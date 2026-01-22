@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_mig
+#SBATCH --gpus=1
+#SBATCH --job-name=multivar_fc_Weather
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=00:10:00
+#SBATCH --output=slurm_output/multivar_fc_Weather_720_%A.out
+
+START_TIME=$(date +%s)
+
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+
+# Activate your environment
+source activate sdmamba
+# pip install pandas==2.1.4
+
+chmod +x scripts/multivariate_forecasting/Weather/S_Mamba.sh
+srun bash scripts/multivariate_forecasting/Weather/S_Mamba.sh
+
+END_TIME=$(date +%s)
+ELAPSED_TIME=$((END_TIME - START_TIME))
+
+echo "Total execution time (seconds): ${ELAPSED_TIME}s"
