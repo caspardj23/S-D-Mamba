@@ -6,18 +6,18 @@ model_name=S_Mamba
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/librivoxspeech/ \
-  --data_path msg_this_side_paradise.csv \
-  --model_id msg_librivoxspeech_96_96 \
+  --data_path sg_this_side_paradise.csv \
+  --model_id sg_librivoxspeech_96_96 \
   --model $model_name \
   --data custom \
   --features M \
   --seq_len 96 \
   --pred_len 96 \
   --e_layers 4 \
-  --enc_in 80 \
-  --dec_in 80 \
-  --c_out 80 \
-  --target 79 \
+  --enc_in 513 \
+  --dec_in 513 \
+  --c_out 513 \
+  --target 512 \
   --des 'Exp' \
   --d_model 512 \
   --d_ff 512 \
@@ -28,18 +28,18 @@ python -u run.py \
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/librivoxspeech/ \
-  --data_path msg_this_side_paradise.csv \
-  --model_id msg_librivoxspeech_96_192 \
+  --data_path sg_this_side_paradise.csv \
+  --model_id sg_librivoxspeech_96_192 \
   --model $model_name \
   --data custom \
   --features M \
   --seq_len 96 \
   --pred_len 192 \
   --e_layers 4 \
-  --enc_in 80 \
-  --dec_in 80 \
-  --c_out 80 \
-  --target 79 \
+  --enc_in 513 \
+  --dec_in 513 \
+  --c_out 513 \
+  --target 512 \
   --des 'Exp' \
   --d_model 512 \
   --d_ff 512 \
@@ -50,18 +50,18 @@ python -u run.py \
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/librivoxspeech/ \
-  --data_path msg_this_side_paradise.csv \
-  --model_id msg_librivoxspeech_96_336 \
+  --data_path sg_this_side_paradise.csv \
+  --model_id sg_librivoxspeech_96_336 \
   --model $model_name \
   --data custom \
   --features M \
   --seq_len 96 \
   --pred_len 336 \
   --e_layers 4 \
-  --enc_in 80 \
-  --dec_in 80 \
-  --c_out 80 \
-  --target 79 \
+  --enc_in 513 \
+  --dec_in 513 \
+  --c_out 513 \
+  --target 512 \
   --des 'Exp' \
   --d_model 512 \
   --d_ff 512 \
@@ -72,18 +72,18 @@ python -u run.py \
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/librivoxspeech/ \
-  --data_path msg_this_side_paradise.csv \
-  --model_id msg_librivoxspeech_96_720 \
+  --data_path sg_this_side_paradise.csv \
+  --model_id sg_librivoxspeech_96_720 \
   --model $model_name \
   --data custom \
   --features M \
   --seq_len 96 \
   --pred_len 720 \
   --e_layers 4 \
-  --enc_in 80 \
-  --dec_in 80 \
-  --c_out 80 \
-  --target 79 \
+  --enc_in 513 \
+  --dec_in 513 \
+  --c_out 513 \
+  --target 512 \
   --des 'Exp' \
   --d_model 512 \
   --d_ff 512 \
