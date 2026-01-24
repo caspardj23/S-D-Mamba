@@ -324,7 +324,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
-                if i % 20 == 0:
+                if i % 20 == 0 or i == 100:
                     input = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
                         shape = input.shape
@@ -332,17 +332,36 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             shape
                         )
 
-                    # Feature index to plot. -1 corresponds to the target feature specified in arguments.
-                    # Change this index to plot other features (0 to feature_dim-1)
-                    plot_idx = 40
+                    if i % 20 == 0:
+                        # Feature index to plot. -1 corresponds to the target feature specified in arguments.
+                        # Change this index to plot other features (0 to feature_dim-1)
+                        plot_idx = 40
 
-                    gt = np.concatenate(
-                        (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
-                    )
-                    pd = np.concatenate(
-                        (input[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
-                    )
-                    visual(gt, pd, os.path.join(folder_path, str(i) + ".pdf"))
+                        gt = np.concatenate(
+                            (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
+                        )
+                        pd = np.concatenate(
+                            (input[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
+                        )
+                        visual(gt, pd, os.path.join(folder_path, str(i) + ".pdf"))
+
+                    if i == 100:
+                        # Feature indices to plot.
+                        plot_indices = [1, 11, 21, 31, 41, 51, 61, 71]
+                        for plot_idx in plot_indices:
+                            gt = np.concatenate(
+                                (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
+                            )
+                            pd = np.concatenate(
+                                (input[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
+                            )
+                            visual(
+                                gt,
+                                pd,
+                                os.path.join(
+                                    folder_path, str(i) + "_" + str(plot_idx) + ".pdf"
+                                ),
+                            )
 
         preds = np.array(preds)
         trues = np.array(trues)
