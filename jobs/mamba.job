@@ -2,12 +2,11 @@
 
 #SBATCH --partition=gpu_mig
 #SBATCH --gpus=1
-#SBATCH --job-name=multivar_fc_LibriVoxSpeech_sg
+#SBATCH --job-name=multivar_fc_LibriVoxSpeech_msg_1500s
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=01:30:00
-#SBATCH --output=slurm_output/multivar_fc_LibriVoxSpeech_sg_test_%A.out
-
+#SBATCH --time=02:00:00
+#SBATCH --output=slurm_output/multivar_fc_LibriVoxSpeech_msg_1500s_%A.out
 
 START_TIME=$(date +%s)
 
@@ -19,8 +18,8 @@ module load Anaconda3/2023.07-2
 source activate sdmamba
 
 
-chmod +x scripts/multivariate_forecasting/LibriVoxSpeech/S_Mamba_sg.sh
-srun bash scripts/multivariate_forecasting/LibriVoxSpeech/S_Mamba_sg.sh
+chmod +x scripts/multivariate_forecasting/LibriVoxSpeech/S_Mamba_msg.sh
+srun bash scripts/multivariate_forecasting/LibriVoxSpeech/S_Mamba_msg.sh
 
 END_TIME=$(date +%s)
 ELAPSED_TIME=$((END_TIME - START_TIME))
