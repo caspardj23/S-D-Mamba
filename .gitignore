@@ -40,6 +40,7 @@ checkpoints/
 results/
 logs/
 test_results/
+test_results_recursive/
 slurm_output/
 result_long_term_forecast.txt
 jobs/

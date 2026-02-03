@@ -6,9 +6,10 @@ model_name=S_Mamba
 python -u run.py \
   --is_training 3 \
   --root_path ./dataset/mngu0/ \
-  --data_path new_test_data.csv \
+  --data_path ema_norm_1001_to_1200.csv \
   --recursive_cycles 10 \
   --model_id mngu0_recursive_test \
+  --checkpoint_model_id mngu0_ema_norm_1000_96_6 \
   --model S_Mamba \
   --data custom \
   --features M \
@@ -22,4 +23,5 @@ python -u run.py \
   --des 'Exp' \
   --d_model 512 \
   --d_ff 512 \
+  --stride 96 \
   --batch_size 32 # Note: data loader will force batch_size=1 for this mode

@@ -49,9 +49,6 @@ class Exp_Recursive_Forecast(Exp_Basic):
 
         preds = []
         trues = []
-        folder_path = "./test_results_recursive/" + setting + "/"
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
 
         self.model.eval()
 
@@ -259,7 +256,7 @@ class Exp_Recursive_Forecast(Exp_Basic):
         print("recursive test shape:", preds.shape, trues.shape)
 
         # Result save
-        folder_path = "./results_recursive/" + setting + "/"
+        folder_path = "./test_results_recursive/" + setting + "/"
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
