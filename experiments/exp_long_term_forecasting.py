@@ -335,7 +335,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     if i % 20 == 0:
                         # Feature index to plot. -1 corresponds to the target feature specified in arguments.
                         # Change this index to plot other features (0 to feature_dim-1)
-                        plot_idx = 40
+                        plot_idx = 40  # for librivoxspeech
+                        # plot_idx = 20  # for mngu0
 
                         gt = np.concatenate(
                             (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
@@ -347,7 +348,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                     if i == 100:
                         # Feature indices to plot.
-                        plot_indices = [1, 11, 21, 31, 41, 51, 61, 71]
+                        # plot_indices = [0, 5, 10, 15, 20] for weather 
+                        plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]  # for librivoxspeech
+                        # plot_indices = list(range(35))  # for mngu0
                         for plot_idx in plot_indices:
                             gt = np.concatenate(
                                 (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
