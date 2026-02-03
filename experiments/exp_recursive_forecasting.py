@@ -69,6 +69,9 @@ class Exp_Recursive_Forecast(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 test_loader
             ):
+                if i % self.args.stride != 0:
+                    continue
+
                 # i corresponds to the index in the dataset
                 # We need to ensure we have enough future data in the dataset for 'cycles' predictions
                 # Total needed future steps = cycles * pred_len

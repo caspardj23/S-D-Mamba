@@ -213,6 +213,12 @@ if __name__ == "__main__":
         default=None,
         help="model id for loading checkpoint in recursive experiment",
     )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=96,
+        help="stride for traversing the dataset in recursive experiment",
+    )
 
     args = parser.parse_args()
     args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
