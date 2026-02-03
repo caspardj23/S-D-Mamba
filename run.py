@@ -301,18 +301,20 @@ if __name__ == "__main__":
                 args.distil,
                 args.des,
                 args.class_strategy,
-        # If checkpoint_model_id is provided, use it for the model loading path (setting)
-        # Otherwise use the args.model_id
-        model_id_for_loading = args.checkpoint_model_id if args.checkpoint_model_id else args.model_id
-        
-        setting = "{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}".format(
-            model_id_for_loading
+                ii,
+            )
             exp = Exp(args)
             exp.get_input(setting)
     elif args.is_training == 3:
         ii = 0
+        # If checkpoint_model_id is provided, use it for the model loading path (setting)
+        # Otherwise use the args.model_id
+        model_id_for_loading = (
+            args.checkpoint_model_id if args.checkpoint_model_id else args.model_id
+        )
+
         setting = "{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}".format(
-            args.model_id,
+            model_id_for_loading,
             args.model,
             args.data,
             args.features,
