@@ -207,6 +207,12 @@ if __name__ == "__main__":
         default=5,
         help="number of recursive cycles for recursive forecast experiment",
     )
+    parser.add_argument(
+        "--checkpoint_model_id",
+        type=str,
+        default=None,
+        help="model id for loading checkpoint in recursive experiment",
+    )
 
     args = parser.parse_args()
     args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
@@ -295,8 +301,12 @@ if __name__ == "__main__":
                 args.distil,
                 args.des,
                 args.class_strategy,
-                ii,
-            )
+        # If checkpoint_model_id is provided, use it for the model loading path (setting)
+        # Otherwise use the args.model_id
+        model_id_for_loading = args.checkpoint_model_id if args.checkpoint_model_id else args.model_id
+        
+        setting = "{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}".format(
+            model_id_for_loading
             exp = Exp(args)
             exp.get_input(setting)
     elif args.is_training == 3:
