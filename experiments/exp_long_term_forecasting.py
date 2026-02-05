@@ -45,6 +45,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 vali_loader
             ):
+                if i >= 5000:
+                    break
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
@@ -255,6 +257,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 test_loader
             ):
+                if i >= 10000:
+                    break
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
                 # time_points = random.sample(range(batch_x.size()[1]), 5)
@@ -324,7 +328,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
-                if i % 100000 == 0 or i == 100:
+                if i % 2000 == 0 or i == 100:
                     input = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
                         shape = input.shape
@@ -333,7 +337,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         )
 
                     # if i % 20 == 0: # for lots of plot
-                    if i % 100000 == 0: # for less plots.
+                    if i % 2000 == 0:  # for less plots.
                         # Feature index to plot. -1 corresponds to the target feature specified in arguments.
                         # Change this index to plot other features (0 to feature_dim-1)
                         plot_idx = 40  # for librivoxspeech
@@ -349,8 +353,19 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                     if i == 100:
                         # Feature indices to plot.
-                        # plot_indices = [0, 5, 10, 15, 20] for weather 
-                        plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]  # for librivoxspeech
+                        # plot_indices = [0, 5, 10, 15, 20] for weather
+                        plot_indices = [
+                            1,
+                            11,
+                            21,
+                            31,
+                            41,
+                            51,
+                            61,
+                            71,
+                            78,
+                            79,
+                        ]  # for librivoxspeech
                         # plot_indices = list(range(35))  # for mngu0
                         for plot_idx in plot_indices:
                             gt = np.concatenate(
