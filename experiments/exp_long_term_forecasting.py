@@ -396,6 +396,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print("mse:{}, mae:{}".format(mse, mae))
+        if self.args.per_variate_scoring:
+            per_variate_mse = np.mean((preds - trues) ** 2, axis=(0, 1))
+            print("Per-variate MSE: {}".format(per_variate_mse))
+            np.save(folder_path + "per_variate_mse.npy", per_variate_mse)
+            per_variate_mae = np.mean(np.abs(preds - trues), axis=(0, 1))
+            print("Per-variate MAE: {}".format(per_variate_mae))
+            np.save(folder_path + "per_variate_mae.npy", per_variate_mae)
+
         f = open("result_long_term_forecast.txt", "a")
         f.write(setting + "  \n")
         f.write("mse:{}, mae:{}".format(mse, mae))

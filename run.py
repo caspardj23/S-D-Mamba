@@ -112,6 +112,11 @@ if __name__ == "__main__":
         action="store_true",
         help="whether to predict unseen future data",
     )
+    parser.add_argument(
+        "--per_variate_scoring",
+        action="store_true",
+        help="whether to calculate MSE per variate",
+    )
 
     # optimization
     parser.add_argument(
