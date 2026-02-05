@@ -45,7 +45,8 @@ python -u run.py \
   --d_ff 512 \
   --batch_size 32 \
   --learning_rate 0.0001 \
-  --itr 1
+  --itr 1 \
+  --per_variate_scoring
 
 # python -u run.py \
 #   --is_training 1 \
