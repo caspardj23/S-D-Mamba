@@ -9,12 +9,12 @@ python -u run.py \
   --data_path ema_norm_1001_to_1200.csv \
   --recursive_cycles 10 \
   --model_id mngu0_recursive_test \
-  --checkpoint_model_id mngu0_ema_norm_1000_96_6 \
+  --checkpoint_model_id mngu0_ema_norm_1000_96_12 \
   --model S_Mamba \
   --data custom \
   --features M \
   --seq_len 96 \
-  --pred_len 6 \
+  --pred_len 12 \
   --e_layers 4 \
   --enc_in 36 \
   --dec_in 36 \

@@ -324,7 +324,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
-                if i % 20 == 0 or i == 100:
+                if i % 100000 == 0 or i == 100:
                     input = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
                         shape = input.shape
@@ -332,7 +332,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             shape
                         )
 
-                    if i % 20 == 0:
+                    # if i % 20 == 0: # for lots of plot
+                    if i % 100000 == 0: # for less plots.
                         # Feature index to plot. -1 corresponds to the target feature specified in arguments.
                         # Change this index to plot other features (0 to feature_dim-1)
                         plot_idx = 40  # for librivoxspeech
