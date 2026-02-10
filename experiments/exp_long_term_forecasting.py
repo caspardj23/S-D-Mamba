@@ -127,6 +127,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 train_loader
             ):
+                # if i == 1000: # for checking if train, val, and test are working. Remove this
+                #     break
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -248,7 +250,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         preds = []
         trues = []
-        folder_path = "./test_results/" + setting + "/"
+        path_after_dataset = self.args.root_path.split('dataset/')[-1].rstrip('/')
+        model_name = self.args.model
+        folder_path = "./test_results/" + path_after_dataset + "/" + model_name + "/" + setting + "/"
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
@@ -328,7 +332,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
-                if i % 2000 == 0 or i == 100:
+                if i % 1000 == 0 or i == 2000:
                     input = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
                         shape = input.shape
@@ -337,11 +341,15 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         )
 
                     # if i % 20 == 0: # for lots of plot
-                    if i % 2000 == 0:  # for less plots.
+                    if i % 1000 == 0:  # for less plots.
                         # Feature index to plot. -1 corresponds to the target feature specified in arguments.
                         # Change this index to plot other features (0 to feature_dim-1)
-                        plot_idx = 40  # for librivoxspeech
-                        # plot_idx = 20  # for mngu0
+                        if self.args.enc_in == 80:
+                            plot_idx = 40  # for librivoxspeech
+                        elif self.args.enc_in == 12 or self.args.enc_in == 24 or self.args.enc_in == 36:
+                            plot_idx = 3  # for mngu0
+                        else:
+                            plot_idx = 0  # default
 
                         gt = np.concatenate(
                             (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
@@ -351,22 +359,21 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         )
                         visual(gt, pd, os.path.join(folder_path, str(i) + ".pdf"))
 
-                    if i == 100:
+                    if i == 2000:
                         # Feature indices to plot.
-                        # plot_indices = [0, 5, 10, 15, 20] for weather
-                        plot_indices = [
-                            1,
-                            11,
-                            21,
-                            31,
-                            41,
-                            51,
-                            61,
-                            71,
-                            78,
-                            79,
-                        ]  # for librivoxspeech
-                        # plot_indices = list(range(35))  # for mngu0
+                        # plot_indices = [0, 5, 10, 15, 20]  # for weather
+
+                        if self.args.enc_in == 80:
+                            plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]  # for librivoxspeech
+                        elif self.args.enc_in == 36:
+                            plot_indices = list(range(36))  # for mngu0
+                        elif self.args.enc_in == 12:
+                            plot_indices = list(range(12))  # for mngu0 first 12 features
+                        elif self.args.enc_in == 24:
+                            plot_indices = list(range(24))  # for mngu0 first 24 features
+                        else:
+                            plot_indices = [0, 5, 10, 15, 20]  # default
+
                         for plot_idx in plot_indices:
                             gt = np.concatenate(
                                 (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
