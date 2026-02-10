@@ -250,9 +250,17 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         preds = []
         trues = []
-        path_after_dataset = self.args.root_path.split('dataset/')[-1].rstrip('/')
+        path_after_dataset = self.args.root_path.split("dataset/")[-1].rstrip("/")
         model_name = self.args.model
-        folder_path = "./test_results/" + path_after_dataset + "/" + model_name + "/" + setting + "/"
+        folder_path = (
+            "./test_results/"
+            + path_after_dataset
+            + "/"
+            + model_name
+            + "/"
+            + setting
+            + "/"
+        )
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
@@ -346,7 +354,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         # Change this index to plot other features (0 to feature_dim-1)
                         if self.args.enc_in == 80:
                             plot_idx = 40  # for librivoxspeech
-                        elif self.args.enc_in == 12 or self.args.enc_in == 24 or self.args.enc_in == 36:
+                        elif (
+                            self.args.enc_in == 12
+                            or self.args.enc_in == 24
+                            or self.args.enc_in == 36
+                        ):
                             plot_idx = 3  # for mngu0
                         else:
                             plot_idx = 0  # default
@@ -364,13 +376,28 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         # plot_indices = [0, 5, 10, 15, 20]  # for weather
 
                         if self.args.enc_in == 80:
-                            plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]  # for librivoxspeech
+                            plot_indices = [
+                                1,
+                                11,
+                                21,
+                                31,
+                                41,
+                                51,
+                                61,
+                                71,
+                                78,
+                                79,
+                            ]  # for librivoxspeech
                         elif self.args.enc_in == 36:
                             plot_indices = list(range(36))  # for mngu0
                         elif self.args.enc_in == 12:
-                            plot_indices = list(range(12))  # for mngu0 first 12 features
+                            plot_indices = list(
+                                range(12)
+                            )  # for mngu0 first 12 features
                         elif self.args.enc_in == 24:
-                            plot_indices = list(range(24))  # for mngu0 first 24 features
+                            plot_indices = list(
+                                range(24)
+                            )  # for mngu0 first 24 features
                         else:
                             plot_indices = [0, 5, 10, 15, 20]  # default
 
@@ -401,8 +428,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        mae, mse, rmse, mape, mspe = metric(preds, trues)
-        print("mse:{}, mae:{}".format(mse, mae))
+        mae, mse, rmse, mape, mspe, r2 = metric(preds, trues)
+        print("mse:{}, mae:{}, rmse:{}, r2:{}".format(mse, mae, rmse, r2))
         if self.args.per_variate_scoring:
             per_variate_mse = np.mean((preds - trues) ** 2, axis=(0, 1))
             print("Per-variate MSE: {}".format(per_variate_mse))
@@ -411,12 +438,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         f = open("result_long_term_forecast.txt", "a")
         f.write(setting + "  \n")
-        f.write("mse:{}, mae:{}".format(mse, mae))
+        f.write("mse:{}, mae:{}, rmse:{}, r2:{}".format(mse, mae, rmse, r2))
         f.write("\n")
         f.write("\n")
         f.close()
 
-        np.save(folder_path + "metrics.npy", np.array([mae, mse, rmse, mape, mspe]))
+        np.save(folder_path + "metrics.npy", np.array([mae, mse, rmse, mape, mspe, r2]))
         np.save(folder_path + "pred.npy", preds)
         np.save(folder_path + "true.npy", trues)
 

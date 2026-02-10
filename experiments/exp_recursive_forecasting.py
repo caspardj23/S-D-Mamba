@@ -261,14 +261,14 @@ class Exp_Recursive_Forecast(Exp_Basic):
             os.makedirs(folder_path)
 
         # Calculate metrics for the whole sequence
-        mae, mse, rmse, mape, mspe = metric(preds, trues)
-        print("Total mse:{}, mae:{}".format(mse, mae))
+        mae, mse, rmse, mape, mspe, r2 = metric(preds, trues)
+        print("Total mse:{}, mae:{}, rmse:{}, r2:{}".format(mse, mae, rmse, r2))
 
         # Calculate metrics per cycle (to see error propagation)
         print("Metrics per cycle:")
         f = open(os.path.join(folder_path, "result_recursive_forecast.txt"), "a")
         f.write(setting + "  \n")
-        f.write("Total mse:{}, mae:{}\n".format(mse, mae))
+        f.write("Total mse:{}, mae:{}, rmse:{}, r2:{}\n".format(mse, mae, rmse, r2))
 
         cycle_metrics = []
         for c in range(cycles):
@@ -278,15 +278,15 @@ class Exp_Recursive_Forecast(Exp_Basic):
             p_slice = preds[:, start_slice:end_slice, :]
             t_slice = trues[:, start_slice:end_slice, :]
 
-            c_mae, c_mse, c_rmse, c_mape, c_mspe = metric(p_slice, t_slice)
-            print(f"Cycle {c}: mse:{c_mse}, mae:{c_mae}")
-            f.write(f"Cycle {c}: mse:{c_mse}, mae:{c_mae}\n")
-            cycle_metrics.append([c_mae, c_mse, c_rmse, c_mape, c_mspe])
+            c_mae, c_mse, c_rmse, c_mape, c_mspe, c_r2 = metric(p_slice, t_slice)
+            print(f"Cycle {c}: mse:{c_mse}, mae:{c_mae}, rmse:{c_rmse}, r2:{c_r2}")
+            f.write(f"Cycle {c}: mse:{c_mse}, mae:{c_mae}, rmse:{c_rmse}, r2:{c_r2}\n")
+            cycle_metrics.append([c_mae, c_mse, c_rmse, c_mape, c_mspe, c_r2])
 
         f.write("\n")
         f.close()
 
-        np.save(folder_path + "metrics.npy", np.array([mae, mse, rmse, mape, mspe]))
+        np.save(folder_path + "metrics.npy", np.array([mae, mse, rmse, mape, mspe, r2]))
         np.save(folder_path + "cycle_metrics.npy", np.array(cycle_metrics))
         np.save(folder_path + "pred.npy", preds)
         np.save(folder_path + "true.npy", trues)
