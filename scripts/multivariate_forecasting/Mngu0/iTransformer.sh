@@ -5,8 +5,8 @@ model_name=iTransformer
 python -u run.py \
   --is_training 0 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_6 \
+  --data_path ema_norm_100.csv \
+  --model_id mngu0_ema_norm_100_96_6 \
   --model $model_name \
   --data custom \
   --features M \
@@ -27,8 +27,8 @@ python -u run.py \
 python -u run.py \
   --is_training 0 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_12 \
+  --data_path ema_norm_100.csv \
+  --model_id mngu0_ema_norm_100_96_12 \
   --model $model_name \
   --data custom \
   --features M \
@@ -49,8 +49,8 @@ python -u run.py \
 python -u run.py \
   --is_training 0 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_48 \
+  --data_path ema_norm_100.csv \
+  --model_id mngu0_ema_norm_100_96_48 \
   --model $model_name \
   --data custom \
   --features M \
@@ -71,8 +71,8 @@ python -u run.py \
 python -u run.py \
   --is_training 0 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_96 \
+  --data_path ema_norm_100.csv \
+  --model_id mngu0_ema_norm_100_96_96 \
   --model $model_name \
   --data custom \
   --features M \

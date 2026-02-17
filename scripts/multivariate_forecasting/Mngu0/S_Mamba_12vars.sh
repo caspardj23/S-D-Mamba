@@ -6,8 +6,8 @@ model_name=S_Mamba
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000_12vars.csv \
-  --model_id mngu0_ema_norm_1000_12vars_96_6 \
+  --data_path ema_norm_100_12vars.csv \
+  --model_id mngu0_ema_norm_100_12vars_96_6 \
   --model $model_name \
   --data custom \
   --features M \
@@ -28,8 +28,8 @@ python -u run.py \
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000_12vars.csv \
-  --model_id mngu0_ema_norm_1000_12vars_96_12 \
+  --data_path ema_norm_100_12vars.csv \
+  --model_id mngu0_ema_norm_100_12vars_96_12 \
   --model $model_name \
   --data custom \
   --features M \
@@ -50,8 +50,8 @@ python -u run.py \
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000_12vars.csv \
-  --model_id mngu0_ema_norm_1000_12vars_96_48 \
+  --data_path ema_norm_100_12vars.csv \
+  --model_id mngu0_ema_norm_100_12vars_96_48 \
   --model $model_name \
   --data custom \
   --features M \
@@ -72,8 +72,8 @@ python -u run.py \
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1000_12vars.csv \
-  --model_id mngu0_ema_norm_1000_12vars_96_96 \
+  --data_path ema_norm_100_12vars.csv \
+  --model_id mngu0_ema_norm_100_12vars_96_96 \
   --model $model_name \
   --data custom \
   --features M \

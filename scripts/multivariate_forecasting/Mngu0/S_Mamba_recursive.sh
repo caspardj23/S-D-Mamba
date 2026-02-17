@@ -6,10 +6,10 @@ model_name=S_Mamba
 python -u run.py \
   --is_training 3 \
   --root_path ./dataset/mngu0/ \
-  --data_path ema_norm_1001_to_1200_12vars.csv \
+  --data_path ema_norm_101_to_200_12vars.csv \
   --recursive_cycles 10 \
   --model_id mngu0_recursive_test \
-  --checkpoint_model_id mngu0_ema_norm_1000_12vars_96_12 \
+  --checkpoint_model_id mngu0_ema_norm_100_12vars_96_12 \
   --model S_Mamba \
   --data custom \
   --features M \
