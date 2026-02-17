@@ -34,7 +34,12 @@ class Exp_Recursive_Forecast(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        if self.args.loss == "R2":
+            from utils.metrics import R2Loss
+
+            criterion = R2Loss()
+        else:
+            criterion = nn.MSELoss()
         return criterion
 
     def test_recursive(self, setting):

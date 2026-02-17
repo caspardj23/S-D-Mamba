@@ -1,4 +1,19 @@
 import numpy as np
+import torch
+import torch.nn as nn
+
+
+class R2Loss(nn.Module):
+    """R-squared loss for training: minimizes 1 - R^2 (fraction of variance unexplained)."""
+
+    def __init__(self):
+        super(R2Loss, self).__init__()
+
+    def forward(self, pred, true):
+        ss_res = torch.sum((true - pred) ** 2)
+        ss_tot = torch.sum((true - torch.mean(true)) ** 2)
+        r2 = 1 - ss_res / (ss_tot + 1e-8)
+        return 1 - r2  # equivalent to ss_res / ss_tot, but conceptually clearer
 
 
 def RSE(pred, true):

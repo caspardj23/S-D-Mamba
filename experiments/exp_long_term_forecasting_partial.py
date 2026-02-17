@@ -38,7 +38,12 @@ class Exp_Long_Term_Forecast_Partial(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        if self.args.loss == "R2":
+            from utils.metrics import R2Loss
+
+            criterion = R2Loss()
+        else:
+            criterion = nn.MSELoss()
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion, partial_train=False):
