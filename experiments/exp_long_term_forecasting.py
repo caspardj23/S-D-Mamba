@@ -269,7 +269,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 test_loader
             ):
-                if i >= 10000:
+                if i >= 50000:
                     break
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
@@ -358,6 +358,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             self.args.enc_in == 12
                             or self.args.enc_in == 24
                             or self.args.enc_in == 36
+                            or self.args.enc_in == 116
                         ):
                             plot_idx = 3  # for mngu0
                         else:
@@ -398,6 +399,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             plot_indices = list(
                                 range(24)
                             )  # for mngu0 first 24 features
+                        elif self.args.enc_in == 116:
+                            plot_indices = list(range(36)) + list(range(36, 116, 10))  # for mngu0 first 36 ema features + every 10th feature from the msg
                         else:
                             plot_indices = [0, 5, 10, 15, 20]  # default
 
