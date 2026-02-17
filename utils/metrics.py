@@ -1,4 +1,6 @@
 import numpy as np
+import torch
+import torch.nn as nn
 
 
 def RSE(pred, true):
@@ -48,3 +50,22 @@ def metric(pred, true):
     r2 = R2(pred, true)
 
     return mae, mse, rmse, mape, mspe, r2
+
+
+class R2Loss(nn.Module):
+    """R-squared loss for PyTorch training.
+    
+    Computes 1 - R^2 so that minimizing this loss maximizes R^2.
+    R^2 = 1 - (SS_res / SS_tot)
+    Loss = 1 - R^2 = SS_res / SS_tot
+    """
+    def __init__(self):
+        super(R2Loss, self).__init__()
+    
+    def forward(self, pred, true):
+        ss_res = torch.sum((true - pred) ** 2)
+        ss_tot = torch.sum((true - torch.mean(true)) ** 2)
+        # Add epsilon to avoid division by zero
+        r2 = 1 - ss_res / (ss_tot + 1e-8)
+        # Return negative R^2 so minimizing loss maximizes R^2
+        return 1 - r2

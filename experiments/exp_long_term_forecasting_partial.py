@@ -1,7 +1,7 @@
 from data_provider.data_factory import data_provider
 from experiments.exp_basic import Exp_Basic
 from utils.tools import EarlyStopping, adjust_learning_rate, visual
-from utils.metrics import metric
+from utils.metrics import metric, R2Loss
 import torch
 import torch.nn as nn
 from torch import optim
@@ -38,7 +38,12 @@ class Exp_Long_Term_Forecast_Partial(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        if self.args.loss == 'MSE':
+            criterion = nn.MSELoss()
+        elif self.args.loss == 'R2':
+            criterion = R2Loss()
+        else:
+            criterion = nn.MSELoss()
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion, partial_train=False):
