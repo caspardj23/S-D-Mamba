@@ -1,10 +1,11 @@
 export CUDA_VISIBLE_DEVICES=0
 # Example script for using R2 loss instead of MSE loss
 # To use R2 loss, add "--loss R2" to the run.py arguments
+# This script demonstrates using R2 loss with different prediction lengths
 
 model_name=S_Mamba
 
-# Training with R2 loss
+# Example 1: Training with R2 loss for pred_len=6
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
@@ -29,9 +30,9 @@ python -u run.py \
   --per_variate_scoring \
   --loss R2
 
-# Testing with R2 loss
+# Example 2: Training with R2 loss for pred_len=12
 python -u run.py \
-  --is_training 0 \
+  --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
   --model_id mngu0_ema_norm_1000_96_12_r2 \

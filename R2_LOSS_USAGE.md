@@ -91,4 +91,6 @@ class R2Loss(nn.Module):
         return 1 - r2  # Minimize (1 - R²) to maximize R²
 ```
 
-The loss function selection is handled in the experiment classes (`exp_long_term_forecasting.py`, etc.) through the `_select_criterion()` method.
+**Note on R² Calculation:** The loss computes R² across all dimensions (batch, time, features) to produce a single scalar loss value for the optimizer. This is the standard approach for batch-based training, where we want to maximize the overall explained variance across the entire batch. The small epsilon (1e-8) prevents division by zero when the total variance is very small.
+
+The loss function selection is handled in the base experiment class (`exp_basic.py`) through the `_select_criterion()` method, which is inherited by all experiment classes.

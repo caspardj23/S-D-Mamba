@@ -1,9 +1,11 @@
 import os
 import torch
+import torch.nn as nn
 from model import Transformer, Informer, Reformer, Flowformer, Flashformer, \
     iTransformer, iInformer, iReformer, iFlowformer, iFlashformer, S_Mamba, \
     Flashformer_M, Flowformer_M, Autoformer, Autoformer_M, Transformer_M, \
     Informer_M, Reformer_M
+from utils.metrics import R2Loss
 
 
 class Exp_Basic(object):
@@ -56,6 +58,21 @@ class Exp_Basic(object):
 
     def _get_data(self):
         pass
+
+    def _select_criterion(self):
+        """Select loss criterion based on args.loss parameter.
+        
+        Returns:
+            Loss function (MSE or R2)
+        """
+        if self.args.loss == 'MSE':
+            criterion = nn.MSELoss()
+        elif self.args.loss == 'R2':
+            criterion = R2Loss()
+        else:
+            # Default to MSE for backward compatibility
+            criterion = nn.MSELoss()
+        return criterion
 
     def vali(self):
         pass
