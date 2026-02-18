@@ -364,6 +364,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             or self.args.enc_in == 116
                         ):
                             plot_idx = 3  # for mngu0
+                        elif self.args.enc_in == 48:
+                            plot_idx = 7  # for haskins ema 6
                         else:
                             plot_idx = 0  # default
 
@@ -406,6 +408,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             plot_indices = list(range(36)) + list(
                                 range(36, 116, 10)
                             )  # for mngu0 first 36 ema features + every 10th feature from the msg
+                        elif self.args.enc_in == 48:
+                            plot_indices = list(range(48))  # for haskins ema 6
                         else:
                             plot_indices = [0, 5, 10, 15, 20]  # default
 
