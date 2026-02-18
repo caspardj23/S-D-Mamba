@@ -272,7 +272,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 test_loader
             ):
-                if i >= 50000:
+                if i >= 20000: # for quicker testing.
                     break
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
@@ -343,7 +343,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
-                if i % 1000 == 0 or i == 2000:
+                if i % 2000 == 0 or i == 2000:
                     input = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
                         shape = input.shape
@@ -352,7 +352,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         )
 
                     # if i % 20 == 0: # for lots of plot
-                    if i % 1000 == 0:  # for less plots.
+                    if i % 2000 == 0:  # for less plots.
                         # Feature index to plot. -1 corresponds to the target feature specified in arguments.
                         # Change this index to plot other features (0 to feature_dim-1)
                         if self.args.enc_in == 80:
