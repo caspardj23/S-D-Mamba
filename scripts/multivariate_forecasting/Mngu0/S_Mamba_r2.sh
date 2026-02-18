@@ -4,10 +4,10 @@ export CUDA_VISIBLE_DEVICES=0
 model_name=S_Mamba
 
 python -u run.py \
-  --is_training 0 \
+  --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_6 \
+  --model_id mngu0_ema_norm_1000_r2_96_6 \
   --model $model_name \
   --data custom \
   --features M \
@@ -23,14 +23,15 @@ python -u run.py \
   --d_ff 512 \
   --batch_size 32 \
   --learning_rate 0.0001 \
+  --loss R2 \
   --itr 1 \
   --per_variate_scoring
 
 python -u run.py \
-  --is_training 0 \
+  --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_12 \
+  --model_id mngu0_ema_norm_1000_r2_96_12 \
   --model $model_name \
   --data custom \
   --features M \
@@ -46,14 +47,15 @@ python -u run.py \
   --d_ff 512 \
   --batch_size 32 \
   --learning_rate 0.0001 \
+  --loss R2 \
   --itr 1 \
   --per_variate_scoring
 
 python -u run.py \
-  --is_training 0 \
+  --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_48 \
+  --model_id mngu0_ema_norm_1000_r2_96_48 \
   --model $model_name \
   --data custom \
   --features M \
@@ -69,14 +71,15 @@ python -u run.py \
   --d_ff 512 \
   --batch_size 32 \
   --learning_rate 0.0001 \
+  --loss R2 \
   --itr 1 \
   --per_variate_scoring
 
 python -u run.py \
-  --is_training 0 \
+  --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_ema_norm_1000_96_96 \
+  --model_id mngu0_ema_norm_1000_r2_96_96 \
   --model $model_name \
   --data custom \
   --features M \
@@ -92,5 +95,30 @@ python -u run.py \
   --d_ff 512 \
   --batch_size 32 \
   --learning_rate 0.0001 \
+  --loss R2 \
+  --itr 1 \
+  --per_variate_scoring
+
+  python -u run.py \
+  --is_training 1 \
+  --root_path ./dataset/mngu0/ \
+  --data_path ema_norm_1000.csv \
+  --model_id mngu0_ema_norm_1000_r2_96_192 \
+  --model $model_name \
+  --data custom \
+  --features M \
+  --seq_len 96 \
+  --pred_len 192 \
+  --e_layers 4 \
+  --enc_in 36 \
+  --dec_in 36 \
+  --c_out 36 \
+  --target 35 \
+  --des 'Exp' \
+  --d_model 512 \
+  --d_ff 512 \
+  --batch_size 32 \
+  --learning_rate 0.0001 \
+  --loss R2 \
   --itr 1 \
   --per_variate_scoring

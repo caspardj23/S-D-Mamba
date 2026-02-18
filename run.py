@@ -211,7 +211,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--recursive_cycles",
         type=int,
-        default=5,
+        default=10,
         help="number of recursive cycles for recursive forecast experiment",
     )
     parser.add_argument(
