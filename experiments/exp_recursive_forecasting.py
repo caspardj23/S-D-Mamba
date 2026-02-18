@@ -310,6 +310,7 @@ class Exp_Recursive_Forecast(Exp_Basic):
         plt.title("Recursive Forecast Error Propagation")
         plt.xlabel("Cycle Index")
         plt.ylabel("Error Value")
+        plt.ylim(0, 1.5)
         plt.xticks(cycles_range)
         plt.grid(True)
         plt.legend()
