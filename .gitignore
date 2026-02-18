@@ -45,3 +45,5 @@ slurm_output/
 result_long_term_forecast.txt
 jobs/
 # scripts/
+
+*.md

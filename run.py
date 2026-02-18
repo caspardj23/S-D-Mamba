@@ -3,6 +3,7 @@ import torch
 from experiments.exp_long_term_forecasting import Exp_Long_Term_Forecast
 from experiments.exp_long_term_forecasting_partial import Exp_Long_Term_Forecast_Partial
 from experiments.exp_recursive_forecasting import Exp_Recursive_Forecast
+from experiments.exp_speech_forecasting import Exp_Speech_Forecast
 import random
 import numpy as np
 
@@ -163,7 +164,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="MTSF",
-        help="experiemnt name, options:[MTSF, partial_train]",
+        help="experiemnt name, options:[MTSF, partial_train, speech]",
     )
     parser.add_argument(
         "--channel_independence",
@@ -209,6 +210,42 @@ if __name__ == "__main__":
         "--d_state", type=int, default=32, help="parameter of Mamba Block"
     )
     parser.add_argument(
+        "--temporal_e_layers",
+        type=int,
+        default=2,
+        help="number of temporal Mamba layers (S_Mamba_Speech only)",
+    )
+    parser.add_argument(
+        "--d_conv_temporal",
+        type=int,
+        default=4,
+        help="local conv width for temporal Mamba (S_Mamba_Speech only)",
+    )
+    parser.add_argument(
+        "--d_conv_variate",
+        type=int,
+        default=4,
+        help="local conv width for cross-variate Mamba (S_Mamba_Speech only)",
+    )
+    parser.add_argument(
+        "--expand_temporal",
+        type=int,
+        default=2,
+        help="expansion factor for temporal Mamba (S_Mamba_Speech only)",
+    )
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=1.0,
+        help="max gradient norm for clipping (speech experiment)",
+    )
+    parser.add_argument(
+        "--use_cosine_scheduler",
+        action="store_true",
+        default=False,
+        help="use cosine annealing LR scheduler (speech experiment)",
+    )
+    parser.add_argument(
         "--recursive_cycles",
         type=int,
         default=5,
@@ -242,6 +279,8 @@ if __name__ == "__main__":
         Exp = Exp_Recursive_Forecast
     elif args.exp_name == "partial_train":  # See Figure 8 of our paper, for the detail
         Exp = Exp_Long_Term_Forecast_Partial
+    elif args.exp_name == "speech":  # Speech time series forecasting
+        Exp = Exp_Speech_Forecast
     else:  # MTSF: multivariate time series forecasting
         Exp = Exp_Long_Term_Forecast
     import torch.multiprocessing
