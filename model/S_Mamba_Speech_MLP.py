@@ -192,7 +192,7 @@ class Model(nn.Module):
     def _print_param_count(self):
         total = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"[S_Mamba_MLP] Total params: {total:,}  Trainable: {trainable:,}")
+        print(f"[S_Mamba_Speech_MLP] Total params: {total:,}  Trainable: {trainable:,}")
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # x_enc: [B, L, N]

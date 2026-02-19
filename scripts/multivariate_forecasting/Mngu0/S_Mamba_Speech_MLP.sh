@@ -1,6 +1,6 @@
 export CUDA_VISIBLE_DEVICES=0
 
-model_name=S_Mamba_MLP
+model_name=S_Mamba_Speech_MLP
 
 # ============================================================================
 # S_Mamba_MLP on Mngu0 EMA (36 variates)
