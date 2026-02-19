@@ -20,6 +20,7 @@ from model import (
     Informer_M,
     Reformer_M,
     S_Mamba_Speech,
+    S_Mamba_MLP,
 )
 
 
@@ -46,6 +47,7 @@ class Exp_Basic(object):
             "Autoformer_M": Autoformer_M,
             "S_Mamba": S_Mamba,
             "S_Mamba_Speech": S_Mamba_Speech,
+            "S_Mamba_MLP": S_Mamba_MLP,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

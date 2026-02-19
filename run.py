@@ -234,6 +234,12 @@ if __name__ == "__main__":
         help="expansion factor for temporal Mamba (S_Mamba_Speech only)",
     )
     parser.add_argument(
+        "--embed_mlp_expand",
+        type=int,
+        default=2,
+        help="expansion factor for MLP embedding hidden dim (S_Mamba_MLP only)",
+    )
+    parser.add_argument(
         "--max_grad_norm",
         type=float,
         default=1.0,
