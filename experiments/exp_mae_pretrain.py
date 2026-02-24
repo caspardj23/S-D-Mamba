@@ -256,7 +256,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
         # Setup output directory
         path_after_dataset = self.args.root_path.split("dataset/")[-1].rstrip("/")
         model_name = self.args.model
-        folder_path = f"./test_results/{path_after_dataset}/{model_name}/{setting}/"
+        folder_path = f"./test_results_mae/{path_after_dataset}/{model_name}/{setting}/"
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 

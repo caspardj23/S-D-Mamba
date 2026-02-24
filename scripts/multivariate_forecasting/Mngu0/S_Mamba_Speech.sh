@@ -13,7 +13,7 @@ python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_speech_96_6 \
+  --model_id mngu0_96_6 \
   --model $model_name \
   --data custom \
   --features M \
@@ -45,7 +45,7 @@ python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_speech_96_12 \
+  --model_id mngu0_96_12 \
   --model $model_name \
   --data custom \
   --features M \
@@ -77,7 +77,7 @@ python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_speech_96_48 \
+  --model_id mngu0_96_48 \
   --model $model_name \
   --data custom \
   --features M \
@@ -109,12 +109,44 @@ python -u run.py \
   --is_training 1 \
   --root_path ./dataset/mngu0/ \
   --data_path ema_norm_1000.csv \
-  --model_id mngu0_speech_96_96 \
+  --model_id mngu0_96_96 \
   --model $model_name \
   --data custom \
   --features M \
   --seq_len 96 \
   --pred_len 96 \
+  --e_layers 2 \
+  --enc_in 36 \
+  --dec_in 36 \
+  --c_out 36 \
+  --target 35 \
+  --des 'Exp' \
+  --d_model 512 \
+  --d_ff 512 \
+  --d_state 32 \
+  --temporal_e_layers 2 \
+  --d_conv_temporal 4 \
+  --d_conv_variate 4 \
+  --expand_temporal 2 \
+  --batch_size 32 \
+  --learning_rate 0.0001 \
+  --use_norm 0 \
+  --loss MSE \
+  --exp_name speech \
+  --itr 1 \
+  --per_variate_scoring
+
+# --- Horizon 192 (960ms) ---
+python -u run.py \
+  --is_training 1 \
+  --root_path ./dataset/mngu0/ \
+  --data_path ema_norm_1000.csv \
+  --model_id mngu0_96_192 \
+  --model $model_name \
+  --data custom \
+  --features M \
+  --seq_len 96 \
+  --pred_len 192 \
   --e_layers 2 \
   --enc_in 36 \
   --dec_in 36 \

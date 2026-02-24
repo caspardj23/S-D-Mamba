@@ -382,7 +382,7 @@ class Exp_Speech_Forecast(Exp_Basic):
                         # Determine default plot index based on input representation
                         if self.args.enc_in == 80:
                             plot_idx = 40  # mel spectrogram mid-band
-                        elif self.args.enc_in in (12, 24, 36, 116):
+                        elif self.args.enc_in in (12, 24, 36, 48, 116):
                             plot_idx = 3  # mngu0 EMA
                         else:
                             plot_idx = 0
@@ -399,12 +399,8 @@ class Exp_Speech_Forecast(Exp_Basic):
                         # Plot multiple variates for qualitative analysis
                         if self.args.enc_in == 80:
                             plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]
-                        elif self.args.enc_in == 36:
-                            plot_indices = list(range(36))
-                        elif self.args.enc_in == 12:
-                            plot_indices = list(range(12))
-                        elif self.args.enc_in == 24:
-                            plot_indices = list(range(24))
+                        elif self.args.enc_in in (12, 24, 36, 48):
+                            plot_indices = list(range(self.args.enc_in))
                         elif self.args.enc_in == 116:
                             plot_indices = list(range(36)) + list(range(36, 116, 10))
                         else:
