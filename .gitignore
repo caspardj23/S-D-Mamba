@@ -42,8 +42,13 @@ logs/
 test_results/
 test_results_recursive/
 slurm_output/
+slurm_output_mae/
+test_results_mae/
 result_long_term_forecast.txt
+result_mae_pretrain.txt
+result_speech_forecast.txt
 jobs/
+test.txt
 # scripts/
 
 *.md
