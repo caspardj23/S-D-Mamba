@@ -11,7 +11,7 @@ Implements the masked autoencoder pre-training loop:
 
 from data_provider.data_factory import data_provider
 from experiments.exp_basic import Exp_Basic
-from utils.tools import EarlyStopping, adjust_learning_rate
+from utils.tools import EarlyStopping, adjust_learning_rate, visual
 import torch
 import torch.nn as nn
 from torch import optim
@@ -245,7 +245,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
         Evaluate pre-training quality on test set.
 
         Reports reconstruction MSE on masked and unmasked positions,
-        and saves sample reconstructions for visualization.
+        and saves sample reconstructions with visualization plots.
         """
         test_data, test_loader = self._get_data(flag="test")
 
@@ -264,8 +264,10 @@ class Exp_MAE_Pretrain(Exp_Basic):
         total_unmasked_loss = []
         total_full_loss = []
 
+        N = self.args.enc_in  # number of variates
+
         self.model.eval()
-        sample_saved = False
+        plots_saved = False
 
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
@@ -281,18 +283,18 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 target = result["target"]
                 mask = result["mask"]
 
-                # MSE on masked positions
-                mask_float = mask.unsqueeze(-1).float()
+                # MSE on masked positions (per-element, divide by N variates)
+                mask_float = mask.unsqueeze(-1).float()  # [B, L, 1]
                 num_masked = mask_float.sum().clamp(min=1.0)
                 masked_mse = (
-                    ((pred - target) ** 2 * mask_float).sum() / num_masked
+                    ((pred - target) ** 2 * mask_float).sum() / (num_masked * N)
                 ).item()
 
-                # MSE on unmasked positions
+                # MSE on unmasked positions (per-element, divide by N variates)
                 unmask_float = (~mask).unsqueeze(-1).float()
                 num_unmasked = unmask_float.sum().clamp(min=1.0)
                 unmasked_mse = (
-                    ((pred - target) ** 2 * unmask_float).sum() / num_unmasked
+                    ((pred - target) ** 2 * unmask_float).sum() / (num_unmasked * N)
                 ).item()
 
                 # Full MSE
@@ -302,21 +304,65 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 total_unmasked_loss.append(unmasked_mse)
                 total_full_loss.append(full_mse)
 
-                # Save sample reconstructions
-                if not sample_saved and i == 0:
-                    np.save(
-                        os.path.join(folder_path, "sample_pred.npy"),
-                        pred.cpu().numpy(),
+                # --- Visualization plots ---
+                if not plots_saved and i == 0:
+                    pred_np = pred.cpu().numpy()
+                    target_np = target.cpu().numpy()
+                    mask_np = mask.cpu().numpy()
+
+                    # Save raw arrays
+                    np.save(os.path.join(folder_path, "sample_pred.npy"), pred_np)
+                    np.save(os.path.join(folder_path, "sample_target.npy"), target_np)
+                    np.save(os.path.join(folder_path, "sample_mask.npy"), mask_np)
+
+                    # Select representative variates for plotting
+                    if N == 48:
+                        # Haskins EMA: sample across articulators
+                        plot_indices = list(range(N))
+                    elif N in (12, 24, 36):
+                        plot_indices = list(range(N))
+                    else:
+                        plot_indices = list(range(min(N, 12)))
+
+                    sample_idx = 0  # first sample in batch
+
+                    # Plot 1: Per-variate reconstruction (GT vs Pred with mask shading)
+                    self._plot_reconstruction(
+                        target_np[sample_idx],
+                        pred_np[sample_idx],
+                        mask_np[sample_idx],
+                        plot_indices[:8],  # first 8 variates for overview
+                        os.path.join(folder_path, "reconstruction_overview.pdf"),
                     )
-                    np.save(
-                        os.path.join(folder_path, "sample_target.npy"),
-                        target.cpu().numpy(),
+
+                    # Plot 2: Individual variate reconstructions (like original S_Mamba)
+                    for plot_idx in plot_indices:
+                        gt = target_np[sample_idx, :, plot_idx]
+                        pd = pred_np[sample_idx, :, plot_idx]
+                        visual(
+                            gt,
+                            pd,
+                            os.path.join(folder_path, f"variate_{plot_idx}.pdf"),
+                        )
+
+                    # Plot 3: Mask pattern visualization
+                    self._plot_mask_pattern(
+                        mask_np[sample_idx],
+                        os.path.join(folder_path, "mask_pattern.pdf"),
                     )
-                    np.save(
-                        os.path.join(folder_path, "sample_mask.npy"),
-                        mask.cpu().numpy(),
+
+                    # Plot 4: Per-variate MSE heatmap
+                    per_var_mse = (pred_np[sample_idx] - target_np[sample_idx]) ** 2
+                    self._plot_error_heatmap(
+                        per_var_mse,
+                        mask_np[sample_idx],
+                        os.path.join(folder_path, "error_heatmap.pdf"),
                     )
-                    sample_saved = True
+
+                    plots_saved = True
+                    print(
+                        f"  Saved {len(plot_indices)} variate plots + overview to {folder_path}"
+                    )
 
         avg_masked = np.mean(total_masked_loss)
         avg_unmasked = np.mean(total_unmasked_loss)
@@ -349,3 +395,132 @@ class Exp_MAE_Pretrain(Exp_Basic):
         f.close()
 
         return
+
+    def _plot_reconstruction(self, target, pred, mask, variate_indices, save_path):
+        """
+        Plot reconstruction for multiple variates with masked regions shaded.
+
+        Args:
+            target: [L, N] ground truth
+            pred: [L, N] reconstruction
+            mask: [L] boolean mask
+            variate_indices: list of variate indices to plot
+            save_path: output PDF path
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        n_vars = len(variate_indices)
+        fig, axes = plt.subplots(n_vars, 1, figsize=(14, 2.5 * n_vars), sharex=True)
+        if n_vars == 1:
+            axes = [axes]
+
+        for ax, idx in zip(axes, variate_indices):
+            ax.plot(
+                target[:, idx], label="Ground Truth", color="steelblue", linewidth=1.5
+            )
+            ax.plot(
+                pred[:, idx],
+                label="Reconstruction",
+                color="coral",
+                linewidth=1.5,
+                alpha=0.8,
+            )
+
+            # Shade masked regions
+            masked_regions = np.where(mask)[0]
+            if len(masked_regions) > 0:
+                # Find contiguous blocks
+                diffs = np.diff(masked_regions)
+                block_starts = [masked_regions[0]]
+                block_ends = []
+                for j, d in enumerate(diffs):
+                    if d > 1:
+                        block_ends.append(masked_regions[j])
+                        block_starts.append(masked_regions[j + 1])
+                block_ends.append(masked_regions[-1])
+
+                for s, e in zip(block_starts, block_ends):
+                    ax.axvspan(s, e, alpha=0.15, color="red", label=None)
+
+            ax.set_ylabel(f"Var {idx}", fontsize=9)
+            if idx == variate_indices[0]:
+                ax.legend(loc="upper right", fontsize=8)
+            ax.grid(True, alpha=0.3)
+
+        axes[-1].set_xlabel("Frame", fontsize=10)
+        fig.suptitle("MAE Reconstruction (red shading = masked regions)", fontsize=12)
+        plt.tight_layout()
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        plt.close()
+
+    def _plot_mask_pattern(self, mask, save_path):
+        """
+        Visualize the block mask pattern.
+
+        Args:
+            mask: [L] boolean mask
+            save_path: output PDF path
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(14, 1.5))
+        ax.imshow(
+            mask[np.newaxis, :].astype(float),
+            aspect="auto",
+            cmap="Reds",
+            interpolation="nearest",
+        )
+        ax.set_xlabel("Frame")
+        ax.set_yticks([])
+        mask_pct = mask.mean() * 100
+        ax.set_title(f"Block Mask Pattern ({mask_pct:.1f}% masked)", fontsize=11)
+        plt.tight_layout()
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        plt.close()
+
+    def _plot_error_heatmap(self, error, mask, save_path):
+        """
+        Plot squared error heatmap [L, N] with mask overlay.
+
+        Args:
+            error: [L, N] squared errors
+            mask: [L] boolean mask
+            save_path: output PDF path
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(14, 6))
+        im = ax.imshow(
+            error.T,
+            aspect="auto",
+            cmap="hot",
+            interpolation="nearest",
+        )
+        plt.colorbar(im, ax=ax, label="Squared Error")
+
+        # Draw mask boundaries
+        masked_frames = np.where(mask)[0]
+        if len(masked_frames) > 0:
+            diffs = np.diff(masked_frames)
+            block_starts = [masked_frames[0]]
+            for j, d in enumerate(diffs):
+                if d > 1:
+                    block_starts.append(masked_frames[j + 1])
+            for s in block_starts:
+                ax.axvline(x=s, color="cyan", linewidth=0.5, alpha=0.6)
+
+        ax.set_xlabel("Frame")
+        ax.set_ylabel("Variate")
+        ax.set_title("Reconstruction Error Heatmap (cyan lines = mask block starts)")
+        plt.tight_layout()
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        plt.close()

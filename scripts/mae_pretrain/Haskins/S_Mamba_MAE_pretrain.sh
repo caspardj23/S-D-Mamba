@@ -5,19 +5,24 @@
 # Self-supervised pre-training using masked frame prediction.
 # Block masking with configurable mask_ratio and block_size.
 #
+# All parameters can be overridden via environment variables, e.g.:
+#   TRAIN_EPOCHS=30 MASK_RATIO=0.5 bash S_Mamba_MAE_pretrain.sh
+#
 # After pre-training, the encoder checkpoint is saved at:
 #   ./checkpoints/<setting>/encoder_checkpoint.pth
-#
-# Use this checkpoint for fine-tuning with S_Mamba_MAE_finetune.sh
 # ==============================================================================
 
 export CUDA_VISIBLE_DEVICES=0
+
+# --- Configurable via environment variable ---
+TRAIN_EPOCHS=${TRAIN_EPOCHS:-30}
 
 model_name=S_Mamba_MAE
 
 echo "============================================"
 echo "MAE Pre-Training on Haskins EMA"
-echo "mask_ratio=0.4, block_size=8"
+echo "  epochs=${TRAIN_EPOCHS}"
+echo "  mask_ratio=0.4, block_size=8"
 echo "============================================"
 
 python -u run.py \
@@ -43,7 +48,7 @@ python -u run.py \
   --expand_temporal 2 \
   --batch_size 64 \
   --learning_rate 0.001 \
-  --train_epochs 100 \
+  --train_epochs $TRAIN_EPOCHS \
   --patience 10 \
   --use_norm 0 \
   --loss MSE \
