@@ -4,6 +4,8 @@ from experiments.exp_long_term_forecasting import Exp_Long_Term_Forecast
 from experiments.exp_long_term_forecasting_partial import Exp_Long_Term_Forecast_Partial
 from experiments.exp_recursive_forecasting import Exp_Recursive_Forecast
 from experiments.exp_speech_forecasting import Exp_Speech_Forecast
+from experiments.exp_mae_pretrain import Exp_MAE_Pretrain
+from experiments.exp_mae_finetune import Exp_MAE_Finetune
 import random
 import numpy as np
 
@@ -270,7 +272,63 @@ if __name__ == "__main__":
         help="stride for traversing the dataset in recursive experiment",
     )
 
+    # MAE pre-training arguments
+    parser.add_argument(
+        "--mask_ratio",
+        type=float,
+        default=0.4,
+        help="fraction of frames to mask in MAE pre-training",
+    )
+    parser.add_argument(
+        "--block_size",
+        type=int,
+        default=8,
+        help="size of contiguous masked blocks in MAE pre-training",
+    )
+    parser.add_argument(
+        "--warmup_epochs",
+        type=int,
+        default=5,
+        help="number of warmup epochs for MAE pre-training scheduler",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-4,
+        help="weight decay for AdamW optimizer",
+    )
+
+    # MAE fine-tuning arguments
+    parser.add_argument(
+        "--pretrain_checkpoint",
+        type=str,
+        default=None,
+        help="path to pre-trained MAE encoder checkpoint for fine-tuning",
+    )
+    parser.add_argument(
+        "--finetune_strategy",
+        type=str,
+        default="full",
+        help="fine-tuning strategy: freeze, partial, or full",
+    )
+    parser.add_argument(
+        "--unfreeze_layers",
+        type=int,
+        default=2,
+        help="number of encoder layers to unfreeze in partial fine-tuning",
+    )
+    parser.add_argument(
+        "--lr_encoder",
+        type=float,
+        default=None,
+        help="learning rate for pre-trained encoder (default: 0.1 * learning_rate)",
+    )
+
     args = parser.parse_args()
+
+    # Set lr_encoder default if not specified
+    if args.lr_encoder is None:
+        args.lr_encoder = args.learning_rate * 0.1
     args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 
     if args.use_gpu and args.use_multi_gpu:
@@ -283,6 +341,10 @@ if __name__ == "__main__":
     print(args)
     if args.is_training == 3:
         Exp = Exp_Recursive_Forecast
+    elif args.exp_name == "mae_pretrain":  # MAE self-supervised pre-training
+        Exp = Exp_MAE_Pretrain
+    elif args.exp_name == "mae_finetune":  # Fine-tune pre-trained MAE for forecasting
+        Exp = Exp_MAE_Finetune
     elif args.exp_name == "partial_train":  # See Figure 8 of our paper, for the detail
         Exp = Exp_Long_Term_Forecast_Partial
     elif args.exp_name == "speech":  # Speech time series forecasting

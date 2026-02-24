@@ -21,6 +21,7 @@ from model import (
     Reformer_M,
     S_Mamba_Speech,
     S_Mamba_Speech_MLP,
+    S_Mamba_MAE,
 )
 
 
@@ -48,6 +49,8 @@ class Exp_Basic(object):
             "S_Mamba": S_Mamba,
             "S_Mamba_Speech": S_Mamba_Speech,
             "S_Mamba_Speech_MLP": S_Mamba_Speech_MLP,
+            "S_Mamba_MAE": S_Mamba_MAE,
+            "S_Mamba_MAE_Finetune": S_Mamba_MAE,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)
