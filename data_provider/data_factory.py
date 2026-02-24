@@ -62,5 +62,7 @@ def data_provider(args, flag):
         shuffle=shuffle_flag,
         num_workers=args.num_workers,
         drop_last=drop_last,
+        pin_memory=True,
+        persistent_workers=True if args.num_workers > 0 else False,
     )
     return data_set, data_loader

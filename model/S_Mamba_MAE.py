@@ -133,55 +133,48 @@ class BiMambaEncoder(nn.Module):
         return self.norm(x)
 
 
-def generate_block_mask(seq_len, mask_ratio=0.4, block_size=8, device="cpu"):
+def generate_batch_block_mask(
+    batch_size, seq_len, mask_ratio=0.4, block_size=8, device="cpu"
+):
     """
-    Generate a block mask for a single sequence.
+    Generate independent block masks for each sample in a batch (vectorized).
 
-    Randomly selects contiguous blocks to mask, targeting ~mask_ratio fraction.
+    Uses non-overlapping block placement for consistent effective mask ratio.
+    Divides the sequence into num_blocks candidate slots, shuffles them per sample,
+    and selects the first `n_to_mask` slots.
 
     Args:
+        batch_size: Number of samples
         seq_len: Length of the sequence
         mask_ratio: Target fraction of frames to mask (default 0.4 = 40%)
         block_size: Size of each contiguous masked block
         device: torch device
 
     Returns:
-        mask: [L] boolean tensor, True = masked (to be predicted)
+        mask: [B, L] boolean tensor, True = masked (to be predicted)
     """
-    num_frames_to_mask = int(seq_len * mask_ratio)
-    num_blocks = max(1, num_frames_to_mask // block_size)
+    # Number of non-overlapping block slots
+    num_blocks = seq_len // block_size
+    n_to_mask = max(1, int(num_blocks * mask_ratio))
 
-    mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    # Generate random permutations for all samples at once: [B, num_blocks]
+    noise = torch.rand(batch_size, num_blocks, device=device)
+    # argsort gives permutation indices; take first n_to_mask as masked slots
+    ids_shuffle = torch.argsort(noise, dim=1)
+    block_mask = torch.zeros(batch_size, num_blocks, dtype=torch.bool, device=device)
+    block_mask.scatter_(1, ids_shuffle[:, :n_to_mask], True)
 
-    # Randomly place blocks
-    for _ in range(num_blocks):
-        # Ensure we don't go out of bounds
-        max_start = seq_len - block_size
-        if max_start <= 0:
-            mask[:] = True
-            break
-        start = torch.randint(0, max_start + 1, (1,)).item()
-        mask[start : start + block_size] = True
+    # Expand each block slot to block_size frames: [B, num_blocks * block_size]
+    mask = block_mask.unsqueeze(-1).expand(-1, -1, block_size).reshape(batch_size, -1)
+
+    # Handle remainder frames (seq_len % block_size != 0) — leave unmasked
+    if mask.shape[1] < seq_len:
+        pad = torch.zeros(
+            batch_size, seq_len - mask.shape[1], dtype=torch.bool, device=device
+        )
+        mask = torch.cat([mask, pad], dim=1)
 
     return mask
-
-
-def generate_batch_block_mask(
-    batch_size, seq_len, mask_ratio=0.4, block_size=8, device="cpu"
-):
-    """
-    Generate independent block masks for each sample in a batch.
-
-    Returns:
-        mask: [B, L] boolean tensor, True = masked
-    """
-    masks = torch.stack(
-        [
-            generate_block_mask(seq_len, mask_ratio, block_size, device)
-            for _ in range(batch_size)
-        ]
-    )
-    return masks
 
 
 class Model(nn.Module):
@@ -284,8 +277,8 @@ class Model(nn.Module):
         """
         B, L, N = x_enc.shape
 
-        # Store original for computing loss
-        target = x_enc.clone()
+        # Use input directly as target (no in-place modification of x_enc)
+        target = x_enc
 
         # Generate mask if not provided
         if mask is None:
@@ -309,11 +302,11 @@ class Model(nn.Module):
         # Decode to reconstruct
         pred = self.decoder(x)  # [B, L, N]
 
-        # Compute loss on masked positions only
-        mask_float = mask.unsqueeze(-1).float()  # [B, L, 1]
-        num_masked = mask_float.sum().clamp(min=1.0)
-
-        loss = (((pred - target) ** 2) * mask_float).sum() / (num_masked * N)
+        # Compute loss on masked positions only (index directly, avoid full-tensor ops)
+        mask_idx = mask.unsqueeze(-1).expand_as(pred)  # [B, L, N]
+        pred_masked = pred[mask_idx].view(-1, N)  # [num_masked_frames, N]
+        target_masked = target[mask_idx].view(-1, N)  # [num_masked_frames, N]
+        loss = F.mse_loss(pred_masked, target_masked)
 
         return {
             "loss": loss,
