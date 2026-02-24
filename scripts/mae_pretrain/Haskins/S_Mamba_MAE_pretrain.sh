@@ -28,8 +28,8 @@ python -u run.py \
   --model $model_name \
   --data custom \
   --features M \
-  --seq_len 96 \
-  --pred_len 96 \
+  --seq_len 384 \
+  --pred_len 384 \
   --e_layers 4 \
   --enc_in 48 \
   --dec_in 48 \

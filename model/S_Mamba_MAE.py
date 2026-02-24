@@ -403,13 +403,23 @@ class FinetuneModel(nn.Module):
         )
 
         # --- Forecasting head ---
-        # Pool temporal dimension and project to prediction
-        self.forecast_head = nn.Sequential(
-            nn.Linear(self.d_model * self.seq_len, self.d_model * 2),
+        # Use adaptive temporal pooling instead of flattening:
+        #   1. Conv1d to compress temporal dim (seq_len → pred_len)
+        #   2. MLP to project d_model → enc_in per timestep
+        # This scales to any seq_len without parameter explosion.
+        self.temporal_pool = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
             nn.GELU(),
-            nn.LayerNorm(self.d_model * 2),
+            nn.LayerNorm(self.d_model),
+        )
+        # Learned temporal projection: [B, seq_len, d_model] → [B, pred_len, d_model]
+        self.temporal_proj = nn.Linear(self.seq_len, self.pred_len)
+        self.forecast_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.GELU(),
+            nn.LayerNorm(self.d_model),
             nn.Dropout(dropout),
-            nn.Linear(self.d_model * 2, self.pred_len * self.enc_in),
+            nn.Linear(self.d_model, self.enc_in),
         )
 
         self._print_param_count()
@@ -525,10 +535,13 @@ class FinetuneModel(nn.Module):
         x = self.pos_enc(x)
         x = self.encoder(x)  # [B, L, d_model]
 
-        # Flatten temporal dimension and project to forecast
-        x = x.reshape(B, -1)  # [B, L * d_model]
-        dec_out = self.forecast_head(x)  # [B, pred_len * N]
-        dec_out = dec_out.reshape(B, self.pred_len, N)  # [B, pred_len, N]
+        # Temporal pooling + projection to forecast
+        x = self.temporal_pool(x)  # [B, L, d_model]
+        # Transpose to [B, d_model, L], project to [B, d_model, pred_len], transpose back
+        x = self.temporal_proj(x.transpose(1, 2)).transpose(
+            1, 2
+        )  # [B, pred_len, d_model]
+        dec_out = self.forecast_head(x)  # [B, pred_len, N]
 
         if self.use_norm:
             dec_out = dec_out * stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1)
@@ -551,7 +564,11 @@ class FinetuneModel(nn.Module):
             + list(self.pos_enc.parameters())
             + list(self.encoder.parameters())
         )
-        head_params = list(self.forecast_head.parameters())
+        head_params = (
+            list(self.temporal_pool.parameters())
+            + list(self.temporal_proj.parameters())
+            + list(self.forecast_head.parameters())
+        )
 
         return [
             {"params": encoder_params, "lr": lr_encoder},

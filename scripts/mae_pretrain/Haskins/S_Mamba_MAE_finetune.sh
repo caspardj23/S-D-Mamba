@@ -25,7 +25,7 @@ PRETRAIN_CKPT_DIR="./checkpoints"
 # Use the helper at the bottom of this file to find the right path.
 
 # Common args
-SEQ_LEN=96
+SEQ_LEN=384
 PRED_LEN=48
 ENC_IN=48
 D_MODEL=256
@@ -38,7 +38,7 @@ EPOCHS=30
 # Helper: construct the pre-training setting name to find the checkpoint
 # Format: {model_id}_{model}_{data}_{features}_ft{seq_len}_sl{label_len}_pl{pred_len}_...
 # For the default pretrain config:
-PRETRAIN_SETTING="haskins_mae_pretrain_S_Mamba_MAE_custom_M_ft96_sl48_pl96_dm256_nh8_el4_dl1_df512_fc1_ebtimeF_dtTrue_MAE_Pretrain_projection_0"
+PRETRAIN_SETTING="haskins_mae_pretrain_S_Mamba_MAE_custom_M_ft384_sl48_pl384_dm256_nh8_el4_dl1_df512_fc1_ebtimeF_dtTrue_MAE_Pretrain_projection_0"
 PRETRAIN_CKPT="${PRETRAIN_CKPT_DIR}/${PRETRAIN_SETTING}/encoder_checkpoint.pth"
 
 echo "============================================"
