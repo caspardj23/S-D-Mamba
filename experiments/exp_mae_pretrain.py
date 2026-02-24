@@ -1,0 +1,351 @@
+"""
+Experiment class for MAE Self-Supervised Pre-Training on EMA Data.
+
+Implements the masked autoencoder pre-training loop:
+  - Block masking of input frames
+  - MSE loss on masked positions only
+  - Saves encoder checkpoints for downstream fine-tuning
+  - Monitors reconstruction quality on validation set
+  - Logs mask ratio coverage statistics
+"""
+
+from data_provider.data_factory import data_provider
+from experiments.exp_basic import Exp_Basic
+from utils.tools import EarlyStopping, adjust_learning_rate
+import torch
+import torch.nn as nn
+from torch import optim
+import os
+import time
+import warnings
+import numpy as np
+
+warnings.filterwarnings("ignore")
+
+
+class Exp_MAE_Pretrain(Exp_Basic):
+    def __init__(self, args):
+        super(Exp_MAE_Pretrain, self).__init__(args)
+
+    def _build_model(self):
+        model = self.model_dict[self.args.model].Model(self.args).float()
+        if self.args.use_multi_gpu and self.args.use_gpu:
+            model = nn.DataParallel(model, device_ids=self.args.device_ids)
+        return model
+
+    def _get_data(self, flag):
+        data_set, data_loader = data_provider(self.args, flag)
+        return data_set, data_loader
+
+    def _select_optimizer(self):
+        model_optim = optim.AdamW(
+            self.model.parameters(),
+            lr=self.args.learning_rate,
+            weight_decay=getattr(self.args, "weight_decay", 1e-4),
+        )
+        return model_optim
+
+    def _select_scheduler(self, optimizer):
+        """Cosine annealing scheduler for pre-training."""
+        use_cosine = getattr(self.args, "use_cosine_scheduler", True)
+        warmup_epochs = getattr(self.args, "warmup_epochs", 5)
+
+        if use_cosine:
+            # Linear warmup + cosine decay
+            def lr_lambda(epoch):
+                if epoch < warmup_epochs:
+                    return (epoch + 1) / warmup_epochs
+                else:
+                    progress = (epoch - warmup_epochs) / max(
+                        1, self.args.train_epochs - warmup_epochs
+                    )
+                    return 0.5 * (1.0 + np.cos(np.pi * progress))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            return scheduler
+        return None
+
+    def vali(self, vali_data, vali_loader):
+        """Validate reconstruction loss on validation set."""
+        total_loss = []
+        total_masked_ratio = []
+        self.model.eval()
+
+        with torch.no_grad():
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+                vali_loader
+            ):
+                if i >= 2000:
+                    break
+
+                batch_x = batch_x.float().to(self.device)
+
+                # Forward pass (MAE model returns dict with loss)
+                result = self.model(batch_x)
+
+                loss = result["loss"]
+                mask = result["mask"]
+
+                total_loss.append(loss.item())
+                total_masked_ratio.append(mask.float().mean().item())
+
+        avg_loss = np.mean(total_loss)
+        avg_mask_ratio = np.mean(total_masked_ratio)
+        self.model.train()
+        return avg_loss, avg_mask_ratio
+
+    def train(self, setting):
+        train_data, train_loader = self._get_data(flag="train")
+        vali_data, vali_loader = self._get_data(flag="val")
+
+        # Create checkpoint directory
+        path = os.path.join(self.args.checkpoints, setting)
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        time_now = time.time()
+        train_steps = len(train_loader)
+
+        # Early stopping on validation loss
+        patience = getattr(self.args, "patience", 10)
+        early_stopping = EarlyStopping(patience=patience, verbose=True)
+
+        model_optim = self._select_optimizer()
+        scheduler = self._select_scheduler(model_optim)
+
+        if self.args.use_amp:
+            scaler = torch.cuda.amp.GradScaler()
+
+        max_grad_norm = getattr(self.args, "max_grad_norm", 1.0)
+
+        # Training loop
+        for epoch in range(self.args.train_epochs):
+            iter_count = 0
+            train_losses = []
+
+            self.model.train()
+            epoch_time = time.time()
+
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+                train_loader
+            ):
+                iter_count += 1
+                model_optim.zero_grad()
+
+                batch_x = batch_x.float().to(self.device)
+
+                if self.args.use_amp:
+                    with torch.cuda.amp.autocast():
+                        result = self.model(batch_x)
+                        loss = result["loss"]
+
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(model_optim)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_grad_norm
+                    )
+                    scaler.step(model_optim)
+                    scaler.update()
+                else:
+                    result = self.model(batch_x)
+                    loss = result["loss"]
+
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_grad_norm
+                    )
+                    model_optim.step()
+
+                train_losses.append(loss.item())
+
+                if (i + 1) % 100 == 0:
+                    avg_recent = np.mean(train_losses[-100:])
+                    mask_pct = result["mask"].float().mean().item() * 100
+                    print(
+                        f"\titers: {i + 1}, epoch: {epoch + 1} | "
+                        f"loss: {loss.item():.6f} (avg: {avg_recent:.6f}) | "
+                        f"mask: {mask_pct:.1f}%"
+                    )
+                    speed = (time.time() - time_now) / iter_count
+                    left_time = speed * (
+                        (self.args.train_epochs - epoch) * train_steps - i
+                    )
+                    print(f"\tspeed: {speed:.4f}s/iter; left time: {left_time:.1f}s")
+                    iter_count = 0
+                    time_now = time.time()
+
+            epoch_duration = time.time() - epoch_time
+            train_loss = np.mean(train_losses)
+            vali_loss, vali_mask_ratio = self.vali(vali_data, vali_loader)
+
+            lr = model_optim.param_groups[0]["lr"]
+            print(
+                f"Epoch: {epoch + 1} | cost: {epoch_duration:.1f}s | "
+                f"Train Loss: {train_loss:.6f} | Vali Loss: {vali_loss:.6f} | "
+                f"Vali Mask%: {vali_mask_ratio * 100:.1f}% | LR: {lr:.2e}"
+            )
+
+            # Save best model
+            early_stopping(vali_loss, self.model, path)
+            if early_stopping.early_stop:
+                print("Early stopping")
+                break
+
+            # Save periodic checkpoints (every 10 epochs)
+            if (epoch + 1) % 10 == 0:
+                ckpt_path = os.path.join(path, f"checkpoint_epoch{epoch + 1}.pth")
+                self._save_checkpoint(ckpt_path, epoch, train_loss, vali_loss)
+                print(f"  Saved checkpoint: {ckpt_path}")
+
+            # LR scheduling
+            if scheduler is not None:
+                scheduler.step()
+
+        # Load best model and save final encoder state
+        best_model_path = os.path.join(path, "checkpoint.pth")
+        self.model.load_state_dict(torch.load(best_model_path))
+
+        # Save encoder-only weights for downstream fine-tuning
+        encoder_path = os.path.join(path, "encoder_checkpoint.pth")
+        self._save_encoder_checkpoint(encoder_path)
+        print(f"Saved encoder checkpoint: {encoder_path}")
+
+        return self.model
+
+    def _save_checkpoint(self, path, epoch, train_loss, vali_loss):
+        """Save full model checkpoint with metadata."""
+        model_to_save = (
+            self.model.module if hasattr(self.model, "module") else self.model
+        )
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model_to_save.state_dict(),
+                "train_loss": train_loss,
+                "vali_loss": vali_loss,
+                "args": vars(self.args),
+            },
+            path,
+        )
+
+    def _save_encoder_checkpoint(self, path):
+        """Save encoder-only weights for transfer learning."""
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        encoder_state = model.get_encoder_state_dict()
+        torch.save(
+            {
+                "encoder_state": encoder_state,
+                "args": vars(self.args),
+            },
+            path,
+        )
+
+    def test(self, setting, test=0):
+        """
+        Evaluate pre-training quality on test set.
+
+        Reports reconstruction MSE on masked and unmasked positions,
+        and saves sample reconstructions for visualization.
+        """
+        test_data, test_loader = self._get_data(flag="test")
+
+        if test:
+            path = os.path.join("./checkpoints/" + setting, "checkpoint.pth")
+            self.model.load_state_dict(torch.load(path))
+
+        # Setup output directory
+        path_after_dataset = self.args.root_path.split("dataset/")[-1].rstrip("/")
+        model_name = self.args.model
+        folder_path = f"./test_results/{path_after_dataset}/{model_name}/{setting}/"
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+
+        total_masked_loss = []
+        total_unmasked_loss = []
+        total_full_loss = []
+
+        self.model.eval()
+        sample_saved = False
+
+        with torch.no_grad():
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+                test_loader
+            ):
+                if i >= 10000:
+                    break
+
+                batch_x = batch_x.float().to(self.device)
+
+                result = self.model(batch_x)
+                pred = result["pred"]
+                target = result["target"]
+                mask = result["mask"]
+
+                # MSE on masked positions
+                mask_float = mask.unsqueeze(-1).float()
+                num_masked = mask_float.sum().clamp(min=1.0)
+                masked_mse = (
+                    ((pred - target) ** 2 * mask_float).sum() / num_masked
+                ).item()
+
+                # MSE on unmasked positions
+                unmask_float = (~mask).unsqueeze(-1).float()
+                num_unmasked = unmask_float.sum().clamp(min=1.0)
+                unmasked_mse = (
+                    ((pred - target) ** 2 * unmask_float).sum() / num_unmasked
+                ).item()
+
+                # Full MSE
+                full_mse = ((pred - target) ** 2).mean().item()
+
+                total_masked_loss.append(masked_mse)
+                total_unmasked_loss.append(unmasked_mse)
+                total_full_loss.append(full_mse)
+
+                # Save sample reconstructions
+                if not sample_saved and i == 0:
+                    np.save(
+                        os.path.join(folder_path, "sample_pred.npy"),
+                        pred.cpu().numpy(),
+                    )
+                    np.save(
+                        os.path.join(folder_path, "sample_target.npy"),
+                        target.cpu().numpy(),
+                    )
+                    np.save(
+                        os.path.join(folder_path, "sample_mask.npy"),
+                        mask.cpu().numpy(),
+                    )
+                    sample_saved = True
+
+        avg_masked = np.mean(total_masked_loss)
+        avg_unmasked = np.mean(total_unmasked_loss)
+        avg_full = np.mean(total_full_loss)
+
+        print(
+            f"MAE Test Results:\n"
+            f"  Masked MSE:   {avg_masked:.6f}\n"
+            f"  Unmasked MSE: {avg_unmasked:.6f}\n"
+            f"  Full MSE:     {avg_full:.6f}"
+        )
+
+        # Save results
+        folder_results = f"./results/{setting}/"
+        if not os.path.exists(folder_results):
+            os.makedirs(folder_results)
+
+        np.save(
+            os.path.join(folder_results, "mae_metrics.npy"),
+            np.array([avg_masked, avg_unmasked, avg_full]),
+        )
+
+        f = open("result_mae_pretrain.txt", "a")
+        f.write(f"{setting}\n")
+        f.write(
+            f"  masked_mse: {avg_masked:.6f} | "
+            f"unmasked_mse: {avg_unmasked:.6f} | "
+            f"full_mse: {avg_full:.6f}\n\n"
+        )
+        f.close()
+
+        return
