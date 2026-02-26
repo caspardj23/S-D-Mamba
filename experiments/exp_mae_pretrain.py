@@ -118,6 +118,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
         max_grad_norm = getattr(self.args, "max_grad_norm", 1.0)
 
+        # Loss tracking for plotting
+        all_iter_losses = []  # per-iteration training loss
+        epoch_train_losses = []  # per-epoch mean training loss
+        epoch_vali_losses = []  # per-epoch validation loss
+
         # Training loop
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -157,6 +162,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
                     model_optim.step()
 
                 train_losses.append(loss.item())
+                all_iter_losses.append(loss.item())
 
                 if (i + 1) % 100 == 0:
                     avg_recent = np.mean(train_losses[-100:])
@@ -177,6 +183,9 @@ class Exp_MAE_Pretrain(Exp_Basic):
             epoch_duration = time.time() - epoch_time
             train_loss = np.mean(train_losses)
             vali_loss, vali_mask_ratio = self.vali(vali_data, vali_loader)
+
+            epoch_train_losses.append(train_loss)
+            epoch_vali_losses.append(vali_loss)
 
             lr = model_optim.param_groups[0]["lr"]
             print(
@@ -210,7 +219,96 @@ class Exp_MAE_Pretrain(Exp_Basic):
         self._save_encoder_checkpoint(encoder_path)
         print(f"Saved encoder checkpoint: {encoder_path}")
 
+        # Plot training loss curves
+        self._plot_training_loss(
+            all_iter_losses, epoch_train_losses, epoch_vali_losses, train_steps, path
+        )
+
         return self.model
+
+    def _plot_training_loss(
+        self, iter_losses, epoch_train, epoch_vali, steps_per_epoch, save_dir
+    ):
+        """
+        Plot training loss curves and save to checkpoint directory.
+
+        Creates two subplots:
+          1. Per-iteration training loss (with smoothed overlay)
+          2. Per-epoch train vs validation loss
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
+
+        # --- Subplot 1: Per-iteration loss ---
+        iterations = np.arange(1, len(iter_losses) + 1)
+        ax1.plot(
+            iterations,
+            iter_losses,
+            alpha=0.3,
+            color="steelblue",
+            linewidth=0.5,
+            label="Raw",
+        )
+        # Smoothed with exponential moving average
+        if len(iter_losses) > 1:
+            window = max(1, len(iter_losses) // 50)
+            smoothed = np.convolve(iter_losses, np.ones(window) / window, mode="valid")
+            ax1.plot(
+                iterations[window - 1 :],
+                smoothed,
+                color="coral",
+                linewidth=1.5,
+                label=f"Smoothed (window={window})",
+            )
+        ax1.set_xlabel("Iteration")
+        ax1.set_ylabel("Training Loss")
+        ax1.set_title("Training Loss per Iteration")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # --- Subplot 2: Per-epoch train vs vali ---
+        epochs = np.arange(1, len(epoch_train) + 1)
+        ax2.plot(
+            epochs,
+            epoch_train,
+            marker="o",
+            markersize=3,
+            label="Train",
+            color="steelblue",
+        )
+        ax2.plot(
+            epochs,
+            epoch_vali,
+            marker="s",
+            markersize=3,
+            label="Validation",
+            color="coral",
+        )
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Loss")
+        ax2.set_title("Train vs Validation Loss per Epoch")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        plt.suptitle("MAE Pre-Training Loss Curves", fontsize=13)
+        plt.tight_layout()
+        plot_path = os.path.join(save_dir, "training_loss_curves.pdf")
+        plt.savefig(plot_path, bbox_inches="tight", dpi=150)
+        plt.close()
+        print(f"Saved training loss plot: {plot_path}")
+
+        # Also save raw data for later analysis
+        np.savez(
+            os.path.join(save_dir, "training_loss_data.npz"),
+            iter_losses=np.array(iter_losses),
+            epoch_train_losses=np.array(epoch_train),
+            epoch_vali_losses=np.array(epoch_vali),
+            steps_per_epoch=steps_per_epoch,
+        )
 
     def _save_checkpoint(self, path, epoch, train_loss, vali_loss):
         """Save full model checkpoint with metadata."""
@@ -264,6 +362,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
         total_unmasked_loss = []
         total_full_loss = []
 
+        # Collect predictions, targets, and masks for R2 computation
+        all_preds = []
+        all_targets = []
+        all_masks = []
+
         N = self.args.enc_in  # number of variates
 
         self.model.eval()
@@ -303,6 +406,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 total_masked_loss.append(masked_mse)
                 total_unmasked_loss.append(unmasked_mse)
                 total_full_loss.append(full_mse)
+
+                # Store for R2 computation
+                all_preds.append(pred.cpu().numpy())
+                all_targets.append(target.cpu().numpy())
+                all_masks.append(mask.cpu().numpy())
 
                 # --- Visualization plots ---
                 if not plots_saved and i == 0:
@@ -368,11 +476,32 @@ class Exp_MAE_Pretrain(Exp_Basic):
         avg_unmasked = np.mean(total_unmasked_loss)
         avg_full = np.mean(total_full_loss)
 
+        # Compute R2 scores from collected predictions/targets
+        all_preds = np.concatenate(all_preds, axis=0)
+        all_targets = np.concatenate(all_targets, axis=0)
+        all_masks = np.concatenate(all_masks, axis=0)  # [B, L]
+
+        # R2 on full reconstruction
+        ss_res = np.sum((all_targets - all_preds) ** 2)
+        ss_tot = np.sum((all_targets - np.mean(all_targets)) ** 2)
+        r2_full = 1 - ss_res / (ss_tot + 1e-8)
+
+        # R2 on masked positions only
+        mask_expanded = all_masks[:, :, np.newaxis]  # [B, L, 1]
+        mask_bool = np.broadcast_to(mask_expanded, all_preds.shape).astype(bool)
+        masked_preds = all_preds[mask_bool]
+        masked_targets = all_targets[mask_bool]
+        ss_res_masked = np.sum((masked_targets - masked_preds) ** 2)
+        ss_tot_masked = np.sum((masked_targets - np.mean(masked_targets)) ** 2)
+        r2_masked = 1 - ss_res_masked / (ss_tot_masked + 1e-8)
+
         print(
             f"MAE Test Results:\n"
             f"  Masked MSE:   {avg_masked:.6f}\n"
             f"  Unmasked MSE: {avg_unmasked:.6f}\n"
-            f"  Full MSE:     {avg_full:.6f}"
+            f"  Full MSE:     {avg_full:.6f}\n"
+            f"  R2 (full):    {r2_full:.6f}\n"
+            f"  R2 (masked):  {r2_masked:.6f}"
         )
 
         # Save results
@@ -382,7 +511,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
         np.save(
             os.path.join(folder_results, "mae_metrics.npy"),
-            np.array([avg_masked, avg_unmasked, avg_full]),
+            np.array([avg_masked, avg_unmasked, avg_full, r2_full, r2_masked]),
         )
 
         f = open("result_mae_pretrain.txt", "a")
@@ -390,7 +519,9 @@ class Exp_MAE_Pretrain(Exp_Basic):
         f.write(
             f"  masked_mse: {avg_masked:.6f} | "
             f"unmasked_mse: {avg_unmasked:.6f} | "
-            f"full_mse: {avg_full:.6f}\n\n"
+            f"full_mse: {avg_full:.6f} | "
+            f"r2_full: {r2_full:.6f} | "
+            f"r2_masked: {r2_masked:.6f}\n\n"
         )
         f.close()
 

@@ -12,7 +12,8 @@ Supports differential learning rates: lower LR for encoder, higher for head.
 
 from data_provider.data_factory import data_provider
 from experiments.exp_basic import Exp_Basic
-from model.S_Mamba_MAE import FinetuneModel
+from model.S_Mamba_MAE import FinetuneModel as MambaFinetuneModel
+from model.Transformer_MAE import FinetuneModel as TransformerFinetuneModel
 from utils.tools import EarlyStopping, adjust_learning_rate, visual
 from utils.metrics import metric
 import torch
@@ -41,8 +42,12 @@ class Exp_MAE_Finetune(Exp_Basic):
             print("Training from scratch (no pre-training).")
 
     def _build_model(self):
-        # Use FinetuneModel (not the MAE pre-training Model)
-        model = FinetuneModel(self.args).float()
+        # Select FinetuneModel based on the model name
+        model_name = getattr(self.args, "model", "S_Mamba_MAE_Finetune")
+        if "Transformer" in model_name:
+            model = TransformerFinetuneModel(self.args).float()
+        else:
+            model = MambaFinetuneModel(self.args).float()
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
@@ -158,6 +163,11 @@ class Exp_MAE_Finetune(Exp_Basic):
         else:
             scheduler = None
 
+        # Loss tracking for plotting
+        all_iter_losses = []  # per-iteration training loss
+        epoch_train_losses = []  # per-epoch mean training loss
+        epoch_vali_losses = []  # per-epoch validation loss
+
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_losses = []
@@ -224,6 +234,7 @@ class Exp_MAE_Finetune(Exp_Basic):
                     model_optim.step()
 
                 train_losses.append(loss.item())
+                all_iter_losses.append(loss.item())
 
                 if (i + 1) % 100 == 0:
                     print(
@@ -241,6 +252,9 @@ class Exp_MAE_Finetune(Exp_Basic):
             train_loss = np.mean(train_losses)
             vali_loss = self.vali(vali_data, vali_loader, criterion)
             test_loss = self.vali(test_data, test_loader, criterion)
+
+            epoch_train_losses.append(train_loss)
+            epoch_vali_losses.append(vali_loss)
 
             print(
                 f"Epoch: {epoch + 1} cost: {epoch_duration:.1f}s | "
@@ -260,7 +274,97 @@ class Exp_MAE_Finetune(Exp_Basic):
 
         best_model_path = os.path.join(path, "checkpoint.pth")
         self.model.load_state_dict(torch.load(best_model_path))
+
+        # Plot training loss curves
+        self._plot_training_loss(
+            all_iter_losses, epoch_train_losses, epoch_vali_losses, train_steps, path
+        )
+
         return self.model
+
+    def _plot_training_loss(
+        self, iter_losses, epoch_train, epoch_vali, steps_per_epoch, save_dir
+    ):
+        """
+        Plot training loss curves and save to checkpoint directory.
+
+        Creates two subplots:
+          1. Per-iteration training loss (with smoothed overlay)
+          2. Per-epoch train vs validation loss
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
+
+        # --- Subplot 1: Per-iteration loss ---
+        iterations = np.arange(1, len(iter_losses) + 1)
+        ax1.plot(
+            iterations,
+            iter_losses,
+            alpha=0.3,
+            color="steelblue",
+            linewidth=0.5,
+            label="Raw",
+        )
+        # Smoothed with moving average
+        if len(iter_losses) > 1:
+            window = max(1, len(iter_losses) // 50)
+            smoothed = np.convolve(iter_losses, np.ones(window) / window, mode="valid")
+            ax1.plot(
+                iterations[window - 1 :],
+                smoothed,
+                color="coral",
+                linewidth=1.5,
+                label=f"Smoothed (window={window})",
+            )
+        ax1.set_xlabel("Iteration")
+        ax1.set_ylabel("Training Loss")
+        ax1.set_title("Training Loss per Iteration")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # --- Subplot 2: Per-epoch train vs vali ---
+        epochs = np.arange(1, len(epoch_train) + 1)
+        ax2.plot(
+            epochs,
+            epoch_train,
+            marker="o",
+            markersize=3,
+            label="Train",
+            color="steelblue",
+        )
+        ax2.plot(
+            epochs,
+            epoch_vali,
+            marker="s",
+            markersize=3,
+            label="Validation",
+            color="coral",
+        )
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Loss")
+        ax2.set_title("Train vs Validation Loss per Epoch")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        plt.suptitle("MAE Fine-Tuning Loss Curves", fontsize=13)
+        plt.tight_layout()
+        plot_path = os.path.join(save_dir, "training_loss_curves.pdf")
+        plt.savefig(plot_path, bbox_inches="tight", dpi=150)
+        plt.close()
+        print(f"Saved training loss plot: {plot_path}")
+
+        # Also save raw data for later analysis
+        np.savez(
+            os.path.join(save_dir, "training_loss_data.npz"),
+            iter_losses=np.array(iter_losses),
+            epoch_train_losses=np.array(epoch_train),
+            epoch_vali_losses=np.array(epoch_vali),
+            steps_per_epoch=steps_per_epoch,
+        )
 
     def test(self, setting, test=0):
         test_data, test_loader = self._get_data(flag="test")

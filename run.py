@@ -341,9 +341,15 @@ if __name__ == "__main__":
     print(args)
     if args.is_training == 3:
         Exp = Exp_Recursive_Forecast
-    elif args.exp_name == "mae_pretrain":  # MAE self-supervised pre-training
+    elif args.exp_name in (
+        "mae_pretrain",
+        "transformer_mae_pretrain",
+    ):  # MAE self-supervised pre-training
         Exp = Exp_MAE_Pretrain
-    elif args.exp_name == "mae_finetune":  # Fine-tune pre-trained MAE for forecasting
+    elif args.exp_name in (
+        "mae_finetune",
+        "transformer_mae_finetune",
+    ):  # Fine-tune pre-trained MAE for forecasting
         Exp = Exp_MAE_Finetune
     elif args.exp_name == "partial_train":  # See Figure 8 of our paper, for the detail
         Exp = Exp_Long_Term_Forecast_Partial
