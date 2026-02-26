@@ -219,9 +219,14 @@ class Exp_MAE_Pretrain(Exp_Basic):
         self._save_encoder_checkpoint(encoder_path)
         print(f"Saved encoder checkpoint: {encoder_path}")
 
-        # Plot training loss curves
+        # Plot training loss curves — save to test_results_mae folder
+        path_after_dataset = self.args.root_path.split("dataset/")[-1].rstrip("/")
+        model_name = self.args.model
+        plot_dir = f"./test_results_mae/{path_after_dataset}/{model_name}/{setting}/"
+        if not os.path.exists(plot_dir):
+            os.makedirs(plot_dir)
         self._plot_training_loss(
-            all_iter_losses, epoch_train_losses, epoch_vali_losses, train_steps, path
+            all_iter_losses, epoch_train_losses, epoch_vali_losses, train_steps, plot_dir
         )
 
         return self.model
