@@ -288,8 +288,28 @@ class Exp_Recursive_Forecast(Exp_Basic):
             f.write(f"Cycle {c}: mse:{c_mse}, mae:{c_mae}, rmse:{c_rmse}, r2:{c_r2}\n")
             cycle_metrics.append([c_mae, c_mse, c_rmse, c_mape, c_mspe, c_r2])
 
+            # W&B per-cycle metrics
+            self._wandb_log(
+                {
+                    f"recursive/cycle_{c}_mse": c_mse,
+                    f"recursive/cycle_{c}_mae": c_mae,
+                    f"recursive/cycle_{c}_rmse": c_rmse,
+                    f"recursive/cycle_{c}_r2": c_r2,
+                }
+            )
+
         f.write("\n")
         f.close()
+
+        # W&B total metrics
+        self._wandb_log(
+            {
+                "recursive/total_mse": mse,
+                "recursive/total_mae": mae,
+                "recursive/total_rmse": rmse,
+                "recursive/total_r2": r2,
+            }
+        )
 
         np.save(folder_path + "metrics.npy", np.array([mae, mse, rmse, mape, mspe, r2]))
         np.save(folder_path + "cycle_metrics.npy", np.array(cycle_metrics))

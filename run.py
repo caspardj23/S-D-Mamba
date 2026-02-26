@@ -298,6 +298,26 @@ if __name__ == "__main__":
         help="weight decay for AdamW optimizer",
     )
 
+    # Weights & Biases
+    parser.add_argument(
+        "--use_wandb",
+        action="store_true",
+        default=False,
+        help="enable Weights & Biases logging",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="S-D-Mamba",
+        help="W&B project name",
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=None,
+        help="W&B team/entity name (default: personal account)",
+    )
+
     # MAE fine-tuning arguments
     parser.add_argument(
         "--pretrain_checkpoint",
@@ -385,6 +405,18 @@ if __name__ == "__main__":
                 ii,
             )
 
+            # Initialize W&B run
+            if args.use_wandb:
+                import wandb
+
+                wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=setting,
+                    config=vars(args),
+                    reinit=True,
+                )
+
             exp = Exp(args)  # set experiments
             print(
                 ">>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
@@ -403,6 +435,11 @@ if __name__ == "__main__":
                     )
                 )
                 exp.predict(setting, True)
+
+            if args.use_wandb:
+                import wandb
+
+                wandb.finish()
 
             torch.cuda.empty_cache()
     elif args.is_training == 2:
@@ -461,6 +498,16 @@ if __name__ == "__main__":
         )
         exp = Exp(args)
         exp.test_recursive(setting)
+        if args.use_wandb:
+            import wandb
+
+            wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=f"recursive_{setting}",
+                config=vars(args),
+                reinit=True,
+            )
         torch.cuda.empty_cache()
     else:
         ii = 0

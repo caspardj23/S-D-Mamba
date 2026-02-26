@@ -58,6 +58,19 @@ class Exp_Basic(object):
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)
 
+    @property
+    def use_wandb(self):
+        """Check if W&B logging is enabled."""
+        return getattr(self.args, "use_wandb", False)
+
+    def _wandb_log(self, metrics, step=None):
+        """Log metrics to W&B if enabled. Safe no-op otherwise."""
+        if self.use_wandb:
+            import wandb
+
+            if wandb.run is not None:
+                wandb.log(metrics, step=step)
+
     def _build_model(self):
         raise NotImplementedError
         return None

@@ -168,6 +168,7 @@ class Exp_MAE_Finetune(Exp_Basic):
         epoch_train_losses = []  # per-epoch mean training loss
         epoch_vali_losses = []  # per-epoch validation loss
 
+        global_step = 0
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_losses = []
@@ -235,6 +236,18 @@ class Exp_MAE_Finetune(Exp_Basic):
 
                 train_losses.append(loss.item())
                 all_iter_losses.append(loss.item())
+                global_step += 1
+
+                # W&B per-iteration logging
+                if self.use_wandb and (i + 1) % 10 == 0:
+                    log_dict = {"train/iter_loss": loss.item()}
+                    if (i + 1) % 100 == 0:
+                        total_norm = 0.0
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                total_norm += p.grad.data.norm(2).item() ** 2
+                        log_dict["train/grad_norm"] = total_norm**0.5
+                    self._wandb_log(log_dict, step=global_step)
 
                 if (i + 1) % 100 == 0:
                     print(
@@ -259,6 +272,19 @@ class Exp_MAE_Finetune(Exp_Basic):
             print(
                 f"Epoch: {epoch + 1} cost: {epoch_duration:.1f}s | "
                 f"Train: {train_loss:.7f} | Vali: {vali_loss:.7f} | Test: {test_loss:.7f}"
+            )
+
+            # W&B epoch-level logging
+            self._wandb_log(
+                {
+                    "epoch": epoch + 1,
+                    "train/epoch_loss": train_loss,
+                    "val/loss": vali_loss,
+                    "test/loss": test_loss,
+                    "train/lr": model_optim.param_groups[0]["lr"],
+                    "train/epoch_time_s": epoch_duration,
+                },
+                step=global_step,
             )
 
             early_stopping(vali_loss, self.model, path)
@@ -459,6 +485,19 @@ class Exp_MAE_Finetune(Exp_Basic):
 
         mae_val, mse_val, rmse_val, mape_val, mspe_val, r2_val = metric(preds, trues)
         print(f"mse:{mse_val}, mae:{mae_val}, rmse:{rmse_val}, r2:{r2_val}")
+
+        # W&B test metrics
+        if self.use_wandb:
+            test_metrics = {
+                "test/mse": mse_val,
+                "test/mae": mae_val,
+                "test/rmse": rmse_val,
+                "test/r2": r2_val,
+            }
+            # Per-variate metrics
+            for vi, v_mse in enumerate(per_variate_mse):
+                test_metrics[f"test/variate_{vi}_mse"] = v_mse
+            self._wandb_log(test_metrics)
 
         # Per-variate and per-step metrics
         per_variate_mse = np.mean((preds - trues) ** 2, axis=(0, 1))

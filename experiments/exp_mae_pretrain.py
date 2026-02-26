@@ -124,6 +124,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
         epoch_vali_losses = []  # per-epoch validation loss
 
         # Training loop
+        global_step = 0
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_losses = []
@@ -163,6 +164,22 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
                 train_losses.append(loss.item())
                 all_iter_losses.append(loss.item())
+                global_step += 1
+
+                # W&B per-iteration logging
+                if self.use_wandb:
+                    log_dict = {
+                        "train/iter_loss": loss.item(),
+                        "train/mask_ratio": result["mask"].float().mean().item(),
+                    }
+                    # Log gradient norm every 100 iters
+                    if (i + 1) % 100 == 0:
+                        total_norm = 0.0
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                total_norm += p.grad.data.norm(2).item() ** 2
+                        log_dict["train/grad_norm"] = total_norm**0.5
+                    self._wandb_log(log_dict, step=global_step)
 
                 if (i + 1) % 100 == 0:
                     avg_recent = np.mean(train_losses[-100:])
@@ -192,6 +209,19 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 f"Epoch: {epoch + 1} | cost: {epoch_duration:.1f}s | "
                 f"Train Loss: {train_loss:.6f} | Vali Loss: {vali_loss:.6f} | "
                 f"Vali Mask%: {vali_mask_ratio * 100:.1f}% | LR: {lr:.2e}"
+            )
+
+            # W&B epoch-level logging
+            self._wandb_log(
+                {
+                    "epoch": epoch + 1,
+                    "train/epoch_loss": train_loss,
+                    "val/loss": vali_loss,
+                    "val/mask_ratio": vali_mask_ratio,
+                    "train/lr": lr,
+                    "train/epoch_time_s": epoch_duration,
+                },
+                step=global_step,
             )
 
             # Save best model
@@ -226,7 +256,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
         if not os.path.exists(plot_dir):
             os.makedirs(plot_dir)
         self._plot_training_loss(
-            all_iter_losses, epoch_train_losses, epoch_vali_losses, train_steps, plot_dir
+            all_iter_losses,
+            epoch_train_losses,
+            epoch_vali_losses,
+            train_steps,
+            plot_dir,
         )
 
         return self.model
@@ -529,6 +563,17 @@ class Exp_MAE_Pretrain(Exp_Basic):
             f"r2_masked: {r2_masked:.6f}\n\n"
         )
         f.close()
+
+        # W&B test metrics
+        self._wandb_log(
+            {
+                "test/masked_mse": avg_masked,
+                "test/unmasked_mse": avg_unmasked,
+                "test/full_mse": avg_full,
+                "test/r2_full": r2_full,
+                "test/r2_masked": r2_masked,
+            }
+        )
 
         return
 

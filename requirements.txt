@@ -4,3 +4,4 @@ matplotlib==3.7.0
 torch==2.0.1
 reformer-pytorch==1.4.4
 mamba-ssm==1.2.0
+wandb>=0.15.0

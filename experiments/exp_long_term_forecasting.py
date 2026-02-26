@@ -121,6 +121,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
 
+        global_step = 0
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
@@ -186,6 +187,19 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     loss = criterion(outputs, batch_y)
                     train_loss.append(loss.item())
 
+                global_step += 1
+
+                # W&B per-iteration logging
+                if self.use_wandb and (i + 1) % 10 == 0:
+                    log_dict = {"train/iter_loss": loss.item()}
+                    if (i + 1) % 100 == 0:
+                        total_norm = 0.0
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                total_norm += p.grad.data.norm(2).item() ** 2
+                        log_dict["train/grad_norm"] = total_norm**0.5
+                    self._wandb_log(log_dict, step=global_step)
+
                 if (i + 1) % 100 == 0:
                     print(
                         "\titers: {0}, epoch: {1} | loss: {2:.7f}".format(
@@ -229,6 +243,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     epoch + 1, train_steps, train_loss, vali_loss, test_loss
                 )
             )
+
+            # W&B epoch-level logging
+            self._wandb_log(
+                {
+                    "epoch": epoch + 1,
+                    "train/epoch_loss": train_loss,
+                    "val/loss": vali_loss,
+                    "test/loss": test_loss,
+                    "train/lr": model_optim.param_groups[0]["lr"],
+                    "train/epoch_time_s": time.time() - epoch_time,
+                },
+                step=global_step,
+            )
+
             early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
@@ -272,7 +300,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 test_loader
             ):
-                if i >= 20000: # for quicker testing.
+                if i >= 20000:  # for quicker testing.
                     break
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
@@ -442,6 +470,21 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         mae, mse, rmse, mape, mspe, r2 = metric(preds, trues)
         print("mse:{}, mae:{}, rmse:{}, r2:{}".format(mse, mae, rmse, r2))
+
+        # W&B test metrics
+        if self.use_wandb:
+            test_metrics = {
+                "test/mse": mse,
+                "test/mae": mae,
+                "test/rmse": rmse,
+                "test/r2": r2,
+            }
+            if self.args.per_variate_scoring:
+                per_variate_mse_vals = np.mean((preds - trues) ** 2, axis=(0, 1))
+                for vi, v_mse in enumerate(per_variate_mse_vals):
+                    test_metrics[f"test/variate_{vi}_mse"] = v_mse
+            self._wandb_log(test_metrics)
+
         if self.args.per_variate_scoring:
             per_variate_mse = np.mean((preds - trues) ** 2, axis=(0, 1))
             print("Per-variate MSE: {}".format(per_variate_mse))
