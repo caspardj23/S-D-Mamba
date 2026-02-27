@@ -532,7 +532,24 @@ if __name__ == "__main__":
             ii,
         )
 
+        if args.use_wandb:
+            import wandb
+
+            wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=setting,
+                config=vars(args),
+                reinit=True,
+            )
+
         exp = Exp(args)  # set experiments
         print(">>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<".format(setting))
         exp.test(setting, test=1)
+
+        if args.use_wandb:
+            import wandb
+
+            wandb.finish()
+
         torch.cuda.empty_cache()
