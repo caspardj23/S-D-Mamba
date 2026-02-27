@@ -459,17 +459,55 @@ class Exp_MAE_Finetune(Exp_Basic):
                 trues.append(true)
 
                 # Save plots
-                if i % 2000 == 0:
+                if i % 2000 == 0 or i == 2000:
                     input_data = batch_x.detach().cpu().numpy()
-                    plot_idx = 3 if self.args.enc_in in (12, 24, 36, 48, 116) else 0
 
-                    gt = np.concatenate(
-                        (input_data[0, :, plot_idx], true[0, :, plot_idx]), axis=0
-                    )
-                    pd_arr = np.concatenate(
-                        (input_data[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
-                    )
-                    visual(gt, pd_arr, os.path.join(folder_path, f"{i}.pdf"))
+                    if i % 2000 == 0:
+                        if self.args.enc_in == 80:
+                            plot_idx = 40  # for librivoxspeech
+                        elif self.args.enc_in in (12, 24, 36, 116):
+                            plot_idx = 3  # for mngu0
+                        elif self.args.enc_in == 48:
+                            plot_idx = 7  # for haskins ema 6
+                        else:
+                            plot_idx = 0  # default
+
+                        gt = np.concatenate(
+                            (input_data[0, :, plot_idx], true[0, :, plot_idx]), axis=0
+                        )
+                        pd_arr = np.concatenate(
+                            (input_data[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
+                        )
+                        visual(gt, pd_arr, os.path.join(folder_path, f"{i}.pdf"))
+
+                    if i == 2000:
+                        if self.args.enc_in == 80:
+                            plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]  # for librivoxspeech
+                        elif self.args.enc_in == 36:
+                            plot_indices = list(range(36))  # for mngu0
+                        elif self.args.enc_in == 12:
+                            plot_indices = list(range(12))  # for mngu0 first 12 features
+                        elif self.args.enc_in == 24:
+                            plot_indices = list(range(24))  # for mngu0 first 24 features
+                        elif self.args.enc_in == 116:
+                            plot_indices = list(range(36)) + list(range(36, 116, 10))  # for mngu0 first 36 ema + every 10th msg feature
+                        elif self.args.enc_in == 48:
+                            plot_indices = list(range(48))  # for haskins ema 6
+                        else:
+                            plot_indices = [0, 5, 10, 15, 20]  # default
+
+                        for plot_idx in plot_indices:
+                            gt = np.concatenate(
+                                (input_data[0, :, plot_idx], true[0, :, plot_idx]), axis=0
+                            )
+                            pd_arr = np.concatenate(
+                                (input_data[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
+                            )
+                            visual(
+                                gt,
+                                pd_arr,
+                                os.path.join(folder_path, f"{i}_{plot_idx}.pdf"),
+                            )
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -486,6 +524,20 @@ class Exp_MAE_Finetune(Exp_Basic):
         mae_val, mse_val, rmse_val, mape_val, mspe_val, r2_val = metric(preds, trues)
         print(f"mse:{mse_val}, mae:{mae_val}, rmse:{rmse_val}, r2:{r2_val}")
 
+        # Per-variate and per-step metrics
+        per_variate_mse = np.mean((preds - trues) ** 2, axis=(0, 1))
+        per_variate_mae = np.mean(np.abs(preds - trues), axis=(0, 1))
+        ss_res = np.sum((preds - trues) ** 2, axis=(0, 1))
+        ss_tot = np.sum((trues - trues.mean(axis=(0, 1), keepdims=True)) ** 2, axis=(0, 1))
+        per_variate_r2 = 1 - ss_res / (ss_tot + 1e-8)
+        per_step_mse = np.mean((preds - trues) ** 2, axis=(0, 2))
+        per_step_mae = np.mean(np.abs(preds - trues), axis=(0, 2))
+
+        print(f"Per-variate MSE: {per_variate_mse}")
+        print(f"Per-variate R2:  {per_variate_r2}")
+        print(f"Per-step MSE (first 10): {per_step_mse[:10]}")
+        print(f"Per-step MSE (last 10):  {per_step_mse[-10:]}")
+
         # W&B test metrics
         if self.use_wandb:
             test_metrics = {
@@ -494,25 +546,17 @@ class Exp_MAE_Finetune(Exp_Basic):
                 "test/rmse": rmse_val,
                 "test/r2": r2_val,
             }
-            # Per-variate metrics
             for vi, v_mse in enumerate(per_variate_mse):
                 test_metrics[f"test/variate_{vi}_mse"] = v_mse
+            for vi, v_r2 in enumerate(per_variate_r2):
+                test_metrics[f"test/variate_{vi}_r2"] = v_r2
             self._wandb_log(test_metrics)
-
-        # Per-variate and per-step metrics
-        per_variate_mse = np.mean((preds - trues) ** 2, axis=(0, 1))
-        per_variate_mae = np.mean(np.abs(preds - trues), axis=(0, 1))
-        per_step_mse = np.mean((preds - trues) ** 2, axis=(0, 2))
-        per_step_mae = np.mean(np.abs(preds - trues), axis=(0, 2))
-
-        print(f"Per-variate MSE: {per_variate_mse}")
-        print(f"Per-step MSE (first 10): {per_step_mse[:10]}")
-        print(f"Per-step MSE (last 10):  {per_step_mse[-10:]}")
 
         f = open("result_mae_finetune.txt", "a")
         f.write(f"{setting}\n")
         f.write(f"mse:{mse_val}, mae:{mae_val}, rmse:{rmse_val}, r2:{r2_val}\n")
         f.write(f"per_variate_mse: {per_variate_mse.tolist()}\n")
+        f.write(f"per_variate_r2: {per_variate_r2.tolist()}\n")
         f.write(f"per_step_mse: {per_step_mse.tolist()}\n\n")
         f.close()
 
@@ -523,6 +567,7 @@ class Exp_MAE_Finetune(Exp_Basic):
         np.save(os.path.join(folder_results, "pred.npy"), preds)
         np.save(os.path.join(folder_results, "true.npy"), trues)
         np.save(os.path.join(folder_results, "per_variate_mse.npy"), per_variate_mse)
+        np.save(os.path.join(folder_results, "per_variate_r2.npy"), per_variate_r2)
         np.save(os.path.join(folder_results, "per_step_mse.npy"), per_step_mse)
 
         return
