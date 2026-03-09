@@ -1,10 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-# Transformer MAE Pre-Training on Haskins EMA Data
+# Transformer MAE Pre-Training on Haskins EMA Data (v2)
 #
 # Self-supervised pre-training using masked frame prediction with a
 # Transformer encoder (replaces BiMamba). Attention naturally handles
 # masked positions without state corruption.
+#
+# v2 changes (aligned with S-Mamba MAE pre-training v2):
+#   - 24 variates (position only) via ema_6_pos.csv
+#   - Speaker-interleaved train/val/test split (Dataset_Haskins_MAE)
+#   - Configurable stride to avoid stride-1 redundancy
 #
 # All parameters can be overridden via environment variables, e.g.:
 #   TRAIN_EPOCHS=50 D_MODEL=256 bash Transformer_MAE_pretrain.sh
@@ -23,42 +28,50 @@ E_LAYERS=${E_LAYERS:-3}
 D_FF=${D_FF:-512}
 DROPOUT=${DROPOUT:-0.2}
 LR=${LR:-0.0003}
-WEIGHT_DECAY=${WEIGHT_DECAY:-0.05}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 MASK_RATIO=${MASK_RATIO:-0.4}
 BLOCK_SIZE=${BLOCK_SIZE:-8}
 BATCH_SIZE=${BATCH_SIZE:-64}
 SEQ_LEN=${SEQ_LEN:-384}
-PATIENCE=${PATIENCE:-15}
+PATIENCE=${PATIENCE:-50}
+MAE_STRIDE=${MAE_STRIDE:-192}
+ENC_IN=${ENC_IN:-24}
+ALPHA_MASK=${ALPHA_MASK:-1.0}
+BETA_NEXT=${BETA_NEXT:-0.0}
+GAMMA_SPECTRAL=${GAMMA_SPECTRAL:-0.0}
 
 model_name=Transformer_MAE
 
 echo "============================================"
-echo "Transformer MAE Pre-Training on Haskins EMA"
+echo "Transformer MAE Pre-Training on Haskins EMA (v2)"
+echo "  variates=${ENC_IN} (position only)"
 echo "  epochs=${TRAIN_EPOCHS}"
 echo "  d_model=${D_MODEL}, n_heads=${N_HEADS}, e_layers=${E_LAYERS}"
 echo "  d_ff=${D_FF}, dropout=${DROPOUT}"
 echo "  lr=${LR}, weight_decay=${WEIGHT_DECAY}"
 echo "  mask_ratio=${MASK_RATIO}, block_size=${BLOCK_SIZE}"
 echo "  batch_size=${BATCH_SIZE}, seq_len=${SEQ_LEN}"
+echo "  mae_stride=${MAE_STRIDE}"
+echo "  alpha_mask=${ALPHA_MASK}, beta_next=${BETA_NEXT}, gamma_spectral=${GAMMA_SPECTRAL}"
 echo "============================================"
 
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/haskins/ \
-  --data_path ema_6.csv \
-  --model_id haskins_transformer_mae_pretrain \
+  --data_path ema_6_pos.csv \
+  --model_id haskins_transformer_mae_pretrain_v2_${TRAIN_EPOCHS}epochs \
   --model $model_name \
-  --data custom \
+  --data haskins_mae \
   --features M \
   --seq_len $SEQ_LEN \
   --pred_len $SEQ_LEN \
   --e_layers $E_LAYERS \
   --n_heads $N_HEADS \
-  --enc_in 48 \
-  --dec_in 48 \
-  --c_out 48 \
-  --target 47 \
-  --des 'TransformerMAE_Pretrain' \
+  --enc_in $ENC_IN \
+  --dec_in $ENC_IN \
+  --c_out $ENC_IN \
+  --target 23 \
+  --des 'TransformerMAE_Pretrain_v2' \
   --d_model $D_MODEL \
   --d_ff $D_FF \
   --batch_size $BATCH_SIZE \
@@ -70,12 +83,17 @@ python -u run.py \
   --exp_name transformer_mae_pretrain \
   --mask_ratio $MASK_RATIO \
   --block_size $BLOCK_SIZE \
-  --warmup_epochs 5 \
+  --warmup_epochs 3 \
   --weight_decay $WEIGHT_DECAY \
   --max_grad_norm 1.0 \
   --use_cosine_scheduler \
   --dropout $DROPOUT \
-  --itr 1
+  --mae_stride $MAE_STRIDE \
+  --alpha_mask $ALPHA_MASK \
+  --beta_next $BETA_NEXT \
+  --gamma_spectral $GAMMA_SPECTRAL \
+  --itr 1 \
+  --per_variate_scoring \
 
 echo "============================================"
 echo "Pre-training complete."

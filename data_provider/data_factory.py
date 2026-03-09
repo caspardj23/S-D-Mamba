@@ -5,6 +5,7 @@ from data_provider.data_loader import (
     Dataset_Solar,
     Dataset_PEMS,
     Dataset_Pred,
+    Dataset_Haskins_MAE,
 )
 from torch.utils.data import DataLoader
 
@@ -16,6 +17,7 @@ data_dict = {
     "Solar": Dataset_Solar,
     "PEMS": Dataset_PEMS,
     "custom": Dataset_Custom,
+    "haskins_mae": Dataset_Haskins_MAE,
 }
 
 
@@ -45,7 +47,8 @@ def data_provider(args, flag):
         batch_size = args.batch_size  # bsz for train and valid
         freq = args.freq
 
-    data_set = Data(
+    # Build keyword arguments for the dataset constructor
+    data_kwargs = dict(
         root_path=args.root_path,
         data_path=args.data_path,
         flag=flag,
@@ -55,6 +58,11 @@ def data_provider(args, flag):
         timeenc=timeenc,
         freq=freq,
     )
+    # Pass stride to Dataset_Haskins_MAE if applicable
+    if args.data == "haskins_mae":
+        data_kwargs["stride"] = getattr(args, "mae_stride", 192)
+
+    data_set = Data(**data_kwargs)
     print(flag, len(data_set))
     data_loader = DataLoader(
         data_set,

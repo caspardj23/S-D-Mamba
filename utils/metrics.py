@@ -10,10 +10,11 @@ class R2Loss(nn.Module):
         super(R2Loss, self).__init__()
 
     def forward(self, pred, true):
-        ss_res = torch.sum((true - pred) ** 2)
-        ss_tot = torch.sum((true - torch.mean(true)) ** 2)
-        r2 = 1 - ss_res / (ss_tot + 1e-8)
-        return 1 - r2  # equivalent to ss_res / ss_tot, but conceptually clearer
+        # Compute per-variate R2, then average (last dim = variates)
+        ss_res = torch.sum((true - pred) ** 2, dim=tuple(range(true.ndim - 1)))
+        ss_tot = torch.sum((true - true.mean(dim=tuple(range(true.ndim - 1)), keepdim=True)) ** 2, dim=tuple(range(true.ndim - 1)))
+        per_variate_r2 = 1 - ss_res / (ss_tot + 1e-8)
+        return 1 - per_variate_r2.mean()
 
 
 def RSE(pred, true):
@@ -49,9 +50,11 @@ def MSPE(pred, true):
 
 
 def R2(pred, true):
-    ss_res = np.sum((true - pred) ** 2)
-    ss_tot = np.sum((true - np.mean(true)) ** 2)
-    return 1 - ss_res / ss_tot
+    """Compute R2 per variate, then average. Expects shape (N, T, C)."""
+    ss_res = np.sum((true - pred) ** 2, axis=(0, 1))
+    ss_tot = np.sum((true - true.mean(axis=(0, 1), keepdims=True)) ** 2, axis=(0, 1))
+    per_variate_r2 = 1 - ss_res / (ss_tot + 1e-8)
+    return np.mean(per_variate_r2)
 
 
 def metric(pred, true):

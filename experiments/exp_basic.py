@@ -23,6 +23,7 @@ from model import (
     S_Mamba_Speech_MLP,
     S_Mamba_MAE,
     Transformer_MAE,
+    Patched_Transformer_MAE,
 )
 
 
@@ -54,6 +55,8 @@ class Exp_Basic(object):
             "S_Mamba_MAE_Finetune": S_Mamba_MAE,
             "Transformer_MAE": Transformer_MAE,
             "Transformer_MAE_Finetune": Transformer_MAE,
+            "Patched_Transformer_MAE": Patched_Transformer_MAE,
+            "Patched_Transformer_MAE_Finetune": Patched_Transformer_MAE,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

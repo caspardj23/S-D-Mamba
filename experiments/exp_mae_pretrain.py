@@ -68,6 +68,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
     def vali(self, vali_data, vali_loader):
         """Validate reconstruction loss on validation set."""
         total_loss = []
+        total_mask_loss = []
         total_masked_ratio = []
         self.model.eval()
 
@@ -85,14 +86,17 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
                 loss = result["loss"]
                 mask = result["mask"]
+                loss_mask = result.get("loss_mask", loss)
 
                 total_loss.append(loss.item())
+                total_mask_loss.append(loss_mask.item())
                 total_masked_ratio.append(mask.float().mean().item())
 
         avg_loss = np.mean(total_loss)
+        avg_mask_loss = np.mean(total_mask_loss)
         avg_mask_ratio = np.mean(total_masked_ratio)
         self.model.train()
-        return avg_loss, avg_mask_ratio
+        return avg_loss, avg_mask_loss, avg_mask_ratio
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag="train")
@@ -118,8 +122,21 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
         max_grad_norm = getattr(self.args, "max_grad_norm", 1.0)
 
+        # Loss weighting
+        alpha_mask = getattr(self.args, "alpha_mask", 1.0)
+        beta_next = getattr(self.args, "beta_next", 0.0)
+        gamma_spectral = getattr(self.args, "gamma_spectral", 0.0)
+        if beta_next > 0 or gamma_spectral > 0:
+            print(
+                f"Auxiliary losses: alpha_mask={alpha_mask}, "
+                f"beta_next={beta_next}, gamma_spectral={gamma_spectral}"
+            )
+
         # Loss tracking for plotting
         all_iter_losses = []  # per-iteration training loss
+        all_iter_mask_losses = []  # per-iteration mask loss
+        all_iter_next_losses = []  # per-iteration next-patch loss
+        all_iter_spectral_losses = []  # per-iteration spectral loss
         epoch_train_losses = []  # per-epoch mean training loss
         epoch_vali_losses = []  # per-epoch validation loss
 
@@ -162,14 +179,24 @@ class Exp_MAE_Pretrain(Exp_Basic):
                     )
                     model_optim.step()
 
+                loss_mask_val = result.get("loss_mask", loss).item()
+                loss_next_val = result.get("loss_next", torch.tensor(0.0)).item()
+                loss_spectral_val = result.get("loss_spectral", torch.tensor(0.0)).item()
+
                 train_losses.append(loss.item())
                 all_iter_losses.append(loss.item())
+                all_iter_mask_losses.append(loss_mask_val)
+                all_iter_next_losses.append(loss_next_val)
+                all_iter_spectral_losses.append(loss_spectral_val)
                 global_step += 1
 
                 # W&B per-iteration logging
                 if self.use_wandb:
                     log_dict = {
                         "train/iter_loss": loss.item(),
+                        "train/iter_loss_mask": loss_mask_val,
+                        "train/iter_loss_next": loss_next_val,
+                        "train/iter_loss_spectral": loss_spectral_val,
                         "train/mask_ratio": result["mask"].float().mean().item(),
                     }
                     # Log gradient norm every 100 iters
@@ -184,10 +211,17 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 if (i + 1) % 100 == 0:
                     avg_recent = np.mean(train_losses[-100:])
                     mask_pct = result["mask"].float().mean().item() * 100
-                    print(
-                        f"\titers: {i + 1}, epoch: {epoch + 1} | "
+                    loss_str = (
                         f"loss: {loss.item():.6f} (avg: {avg_recent:.6f}) | "
                         f"mask: {mask_pct:.1f}%"
+                    )
+                    if beta_next > 0 or gamma_spectral > 0:
+                        avg_mask = np.mean(all_iter_mask_losses[-100:])
+                        avg_next = np.mean(all_iter_next_losses[-100:])
+                        avg_spec = np.mean(all_iter_spectral_losses[-100:])
+                        loss_str += f" | L_mask: {avg_mask:.6f} | L_next: {avg_next:.6f} | L_spec: {avg_spec:.6f}"
+                    print(
+                        f"\titers: {i + 1}, epoch: {epoch + 1} | {loss_str}"
                     )
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * (
@@ -199,33 +233,48 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
             epoch_duration = time.time() - epoch_time
             train_loss = np.mean(train_losses)
-            vali_loss, vali_mask_ratio = self.vali(vali_data, vali_loader)
+            vali_loss, vali_mask_loss, vali_mask_ratio = self.vali(vali_data, vali_loader)
 
             epoch_train_losses.append(train_loss)
             epoch_vali_losses.append(vali_loss)
 
+            # Per-epoch average of component losses
+            epoch_mask_loss = np.mean(all_iter_mask_losses[-len(train_losses):])
+            epoch_next_loss = np.mean(all_iter_next_losses[-len(train_losses):])
+            epoch_spectral_loss = np.mean(all_iter_spectral_losses[-len(train_losses):])
+
             lr = model_optim.param_groups[0]["lr"]
-            print(
+            loss_msg = (
                 f"Epoch: {epoch + 1} | cost: {epoch_duration:.1f}s | "
                 f"Train Loss: {train_loss:.6f} | Vali Loss: {vali_loss:.6f} | "
                 f"Vali Mask%: {vali_mask_ratio * 100:.1f}% | LR: {lr:.2e}"
             )
+            if beta_next > 0 or gamma_spectral > 0:
+                loss_msg += (
+                    f"\n  L_mask: {epoch_mask_loss:.6f} | "
+                    f"L_next: {epoch_next_loss:.6f} | "
+                    f"L_spec: {epoch_spectral_loss:.6f} | "
+                    f"Vali L_mask: {vali_mask_loss:.6f}"
+                )
+            print(loss_msg)
 
             # W&B epoch-level logging
-            self._wandb_log(
-                {
-                    "epoch": epoch + 1,
-                    "train/epoch_loss": train_loss,
-                    "val/loss": vali_loss,
-                    "val/mask_ratio": vali_mask_ratio,
-                    "train/lr": lr,
-                    "train/epoch_time_s": epoch_duration,
-                },
-                step=global_step,
-            )
+            wandb_dict = {
+                "epoch": epoch + 1,
+                "train/epoch_loss": train_loss,
+                "train/epoch_loss_mask": epoch_mask_loss,
+                "train/epoch_loss_next": epoch_next_loss,
+                "train/epoch_loss_spectral": epoch_spectral_loss,
+                "val/loss": vali_loss,
+                "val/loss_mask": vali_mask_loss,
+                "val/mask_ratio": vali_mask_ratio,
+                "train/lr": lr,
+                "train/epoch_time_s": epoch_duration,
+            }
+            self._wandb_log(wandb_dict, step=global_step)
 
-            # Save best model
-            early_stopping(vali_loss, self.model, path)
+            # Early stopping on mask reconstruction loss (primary objective)
+            early_stopping(vali_mask_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
@@ -478,7 +527,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
                         target_np[sample_idx],
                         pred_np[sample_idx],
                         mask_np[sample_idx],
-                        plot_indices[:8],  # first 8 variates for overview
+                        plot_indices,  # all variates
                         os.path.join(folder_path, "reconstruction_overview.pdf"),
                     )
 
@@ -520,19 +569,31 @@ class Exp_MAE_Pretrain(Exp_Basic):
         all_targets = np.concatenate(all_targets, axis=0)
         all_masks = np.concatenate(all_masks, axis=0)  # [B, L]
 
-        # R2 on full reconstruction
-        ss_res = np.sum((all_targets - all_preds) ** 2)
-        ss_tot = np.sum((all_targets - np.mean(all_targets)) ** 2)
-        r2_full = 1 - ss_res / (ss_tot + 1e-8)
+        # Per-variate MSE and R2
+        N = all_preds.shape[-1]
+        per_var_mse_full = np.mean((all_preds - all_targets) ** 2, axis=(0, 1))  # [N]
+        per_var_r2_full = np.zeros(N)
+        per_var_mse_masked = np.zeros(N)
+        per_var_r2_masked = np.zeros(N)
+        mask_exp = all_masks[:, :, np.newaxis]  # [B, L, 1]
+        for v in range(N):
+            # Full R2 per variate
+            res_v = np.sum((all_targets[:, :, v] - all_preds[:, :, v]) ** 2)
+            tot_v = np.sum((all_targets[:, :, v] - np.mean(all_targets[:, :, v])) ** 2)
+            per_var_r2_full[v] = 1 - res_v / (tot_v + 1e-8)
+            # Masked MSE per variate
+            m = all_masks.astype(bool)  # [B, L]
+            masked_pred_v = all_preds[:, :, v][m]
+            masked_tgt_v = all_targets[:, :, v][m]
+            per_var_mse_masked[v] = np.mean((masked_pred_v - masked_tgt_v) ** 2)
+            # Masked R2 per variate
+            res_mv = np.sum((masked_tgt_v - masked_pred_v) ** 2)
+            tot_mv = np.sum((masked_tgt_v - np.mean(masked_tgt_v)) ** 2)
+            per_var_r2_masked[v] = 1 - res_mv / (tot_mv + 1e-8)
 
-        # R2 on masked positions only
-        mask_expanded = all_masks[:, :, np.newaxis]  # [B, L, 1]
-        mask_bool = np.broadcast_to(mask_expanded, all_preds.shape).astype(bool)
-        masked_preds = all_preds[mask_bool]
-        masked_targets = all_targets[mask_bool]
-        ss_res_masked = np.sum((masked_targets - masked_preds) ** 2)
-        ss_tot_masked = np.sum((masked_targets - np.mean(masked_targets)) ** 2)
-        r2_masked = 1 - ss_res_masked / (ss_tot_masked + 1e-8)
+        # Aggregate R2 = mean of per-variate R2 scores (consistent with per-variate table)
+        r2_full = np.mean(per_var_r2_full)
+        r2_masked = np.mean(per_var_r2_masked)
 
         print(
             f"MAE Test Results:\n"
@@ -540,8 +601,16 @@ class Exp_MAE_Pretrain(Exp_Basic):
             f"  Unmasked MSE: {avg_unmasked:.6f}\n"
             f"  Full MSE:     {avg_full:.6f}\n"
             f"  R2 (full):    {r2_full:.6f}\n"
-            f"  R2 (masked):  {r2_masked:.6f}"
+            f"  R2 (masked):  {r2_masked:.6f}\n"
+            f"\n  Per-Variate Metrics:"
         )
+        print(f"  {'Var':>4s}  {'MSE(full)':>10s}  {'MSE(masked)':>11s}  {'R2(full)':>9s}  {'R2(masked)':>10s}")
+        print(f"  {'----':>4s}  {'----------':>10s}  {'-----------':>11s}  {'---------':>9s}  {'----------':>10s}")
+        for v in range(N):
+            print(
+                f"  {v:4d}  {per_var_mse_full[v]:10.6f}  {per_var_mse_masked[v]:11.6f}  "
+                f"{per_var_r2_full[v]:9.6f}  {per_var_r2_masked[v]:10.6f}"
+            )
 
         # Save results
         folder_results = f"./results/{setting}/"
@@ -552,6 +621,13 @@ class Exp_MAE_Pretrain(Exp_Basic):
             os.path.join(folder_results, "mae_metrics.npy"),
             np.array([avg_masked, avg_unmasked, avg_full, r2_full, r2_masked]),
         )
+        np.savez(
+            os.path.join(folder_results, "mae_per_variate_metrics.npz"),
+            mse_full=per_var_mse_full,
+            mse_masked=per_var_mse_masked,
+            r2_full=per_var_r2_full,
+            r2_masked=per_var_r2_masked,
+        )
 
         f = open("result_mae_pretrain.txt", "a")
         f.write(f"{setting}\n")
@@ -560,22 +636,339 @@ class Exp_MAE_Pretrain(Exp_Basic):
             f"unmasked_mse: {avg_unmasked:.6f} | "
             f"full_mse: {avg_full:.6f} | "
             f"r2_full: {r2_full:.6f} | "
-            f"r2_masked: {r2_masked:.6f}\n\n"
+            f"r2_masked: {r2_masked:.6f}\n"
         )
+        for v in range(N):
+            f.write(
+                f"  var{v:02d}: mse_full={per_var_mse_full[v]:.6f} "
+                f"mse_masked={per_var_mse_masked[v]:.6f} "
+                f"r2_full={per_var_r2_full[v]:.6f} "
+                f"r2_masked={per_var_r2_masked[v]:.6f}\n"
+            )
+        f.write("\n")
         f.close()
 
         # W&B test metrics
-        self._wandb_log(
-            {
-                "test/masked_mse": avg_masked,
-                "test/unmasked_mse": avg_unmasked,
-                "test/full_mse": avg_full,
-                "test/r2_full": r2_full,
-                "test/r2_masked": r2_masked,
-            }
-        )
+        wandb_dict = {
+            "test/masked_mse": avg_masked,
+            "test/unmasked_mse": avg_unmasked,
+            "test/full_mse": avg_full,
+            "test/r2_full": r2_full,
+            "test/r2_masked": r2_masked,
+        }
+        self._wandb_log(wandb_dict)
+
+        # W&B per-variate vertical bar charts (logged as images)
+        if self.use_wandb:
+            import wandb
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            variates = np.arange(N)
+
+            def _make_vbar(values, title, ylabel, color="steelblue"):
+                fig, ax = plt.subplots(figsize=(max(8, N * 0.35), 4))
+                ax.bar(variates, values, color=color, width=0.8)
+                ax.set_xlabel("Variate")
+                ax.set_ylabel(ylabel)
+                ax.set_title(title)
+                ax.set_xticks(variates)
+                ax.set_xticklabels(variates, fontsize=max(4, 8 - N // 20))
+                ax.grid(True, alpha=0.3, axis="y")
+                plt.tight_layout()
+                img = wandb.Image(fig)
+                plt.close(fig)
+                return img
+
+            wandb_dict["test/per_variate_r2_full"] = _make_vbar(
+                per_var_r2_full, "Per-Variate R2 (Full)", "R2"
+            )
+            wandb_dict["test/per_variate_r2_masked"] = _make_vbar(
+                per_var_r2_masked, "Per-Variate R2 (Masked)", "R2"
+            )
+            wandb_dict["test/per_variate_mse_full"] = _make_vbar(
+                per_var_mse_full, "Per-Variate MSE (Full)", "MSE", color="coral"
+            )
+            wandb_dict["test/per_variate_mse_masked"] = _make_vbar(
+                per_var_mse_masked, "Per-Variate MSE (Masked)", "MSE", color="coral"
+            )
+
+            self._wandb_log(wandb_dict)
+
+        # ==================================================================
+        # Next-Patch Prediction Evaluation
+        # ==================================================================
+        model_raw = self.model.module if hasattr(self.model, "module") else self.model
+        has_np = getattr(model_raw, "next_patch_decoder", None) is not None
+        if has_np:
+            print("\n--- Next-Patch Prediction Evaluation ---")
+            np_folder = os.path.join(folder_path, "next_patch")
+            if not os.path.exists(np_folder):
+                os.makedirs(np_folder)
+
+            pred_lens = [24, 48, 96]
+            L = self.args.seq_len
+            boundary = L // 2  # fixed mid-sequence boundary
+
+            # Collect per-pred_len metrics
+            for pl in pred_lens:
+                if boundary + 1 + pl > L:
+                    print(f"  Skipping pred_len={pl} (boundary+pl exceeds seq_len)")
+                    continue
+
+                np_preds_all = []
+                np_targets_all = []
+
+                with torch.no_grad():
+                    for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+                        test_loader
+                    ):
+                        if i >= 2000:
+                            break
+                        batch_x = batch_x.float().to(self.device)
+                        # Encode without masking for clean representations
+                        encoder_out = model_raw.encode(batch_x)
+                        # Predict future frames
+                        pred_next = model_raw.next_patch_decoder(
+                            encoder_out, boundary, pl
+                        )  # [B, pl, N]
+                        target_next = batch_x[
+                            :, boundary + 1 : boundary + 1 + pl, :
+                        ]  # [B, pl, N]
+
+                        np_preds_all.append(pred_next.cpu().numpy())
+                        np_targets_all.append(target_next.cpu().numpy())
+
+                np_preds_all = np.concatenate(np_preds_all, axis=0)  # [total, pl, N]
+                np_targets_all = np.concatenate(np_targets_all, axis=0)
+
+                # Per-variate MSE
+                per_var_np_mse = np.mean(
+                    (np_preds_all - np_targets_all) ** 2, axis=(0, 1)
+                )  # [N]
+                avg_np_mse = np.mean(per_var_np_mse)
+
+                # Per-variate R2
+                per_var_np_r2 = np.zeros(N)
+                for v in range(N):
+                    res = np.sum(
+                        (np_targets_all[:, :, v] - np_preds_all[:, :, v]) ** 2
+                    )
+                    tot = np.sum(
+                        (np_targets_all[:, :, v] - np.mean(np_targets_all[:, :, v])) ** 2
+                    )
+                    per_var_np_r2[v] = 1 - res / (tot + 1e-8)
+                avg_np_r2 = np.mean(per_var_np_r2)
+
+                print(
+                    f"  NextPatch (boundary={boundary}, pred_len={pl}): "
+                    f"MSE={avg_np_mse:.6f} | R2={avg_np_r2:.6f}"
+                )
+                print(
+                    f"  {'Var':>4s}  {'MSE':>10s}  {'R2':>10s}"
+                )
+                for v in range(N):
+                    print(
+                        f"  {v:4d}  {per_var_np_mse[v]:10.6f}  {per_var_np_r2[v]:10.6f}"
+                    )
+
+                # Per-variate plots: context + GT future + predicted future
+                sample_pred = np_preds_all[0]  # [pl, N]
+                sample_target_full = np.concatenate(
+                    [np_targets_all[0:1]], axis=0
+                )[0]  # [pl, N] — target future
+                # Get context from first test batch
+                first_batch_x = None
+                for batch_x, _, _, _ in test_loader:
+                    first_batch_x = batch_x[0].numpy()  # [L, N]
+                    break
+                self._plot_next_patch(
+                    context=first_batch_x[:boundary + 1],  # [boundary+1, N]
+                    target_future=first_batch_x[boundary + 1:boundary + 1 + pl],
+                    pred_future=sample_pred,  # [pl, N]
+                    pred_len=pl,
+                    variate_indices=list(range(N)),
+                    save_path=os.path.join(
+                        np_folder, f"next_patch_pl{pl}_overview.pdf"
+                    ),
+                )
+
+                # Individual variate plots
+                for v in range(N):
+                    self._plot_next_patch_variate(
+                        context=first_batch_x[:boundary + 1, v],
+                        target_future=first_batch_x[
+                            boundary + 1 : boundary + 1 + pl, v
+                        ],
+                        pred_future=sample_pred[:, v],
+                        variate_idx=v,
+                        pred_len=pl,
+                        save_path=os.path.join(
+                            np_folder, f"next_patch_pl{pl}_var{v}.pdf"
+                        ),
+                    )
+
+                # Save arrays
+                np.savez(
+                    os.path.join(np_folder, f"next_patch_metrics_pl{pl}.npz"),
+                    per_var_mse=per_var_np_mse,
+                    per_var_r2=per_var_np_r2,
+                    avg_mse=avg_np_mse,
+                    avg_r2=avg_np_r2,
+                )
+
+                # Append to results file
+                f = open("result_mae_pretrain.txt", "a")
+                f.write(
+                    f"  next_patch (boundary={boundary}, pl={pl}): "
+                    f"MSE={avg_np_mse:.6f} | R2={avg_np_r2:.6f}\n"
+                )
+                for v in range(N):
+                    f.write(
+                        f"    var{v:02d}: mse={per_var_np_mse[v]:.6f} "
+                        f"r2={per_var_np_r2[v]:.6f}\n"
+                    )
+                f.close()
+
+                # W&B logging
+                if self.use_wandb:
+                    self._wandb_log(
+                        {
+                            f"test/next_patch_mse_pl{pl}": avg_np_mse,
+                            f"test/next_patch_r2_pl{pl}": avg_np_r2,
+                        }
+                    )
+
+            print("--- Next-Patch Evaluation Complete ---\n")
 
         return
+
+    def _plot_next_patch(
+        self, context, target_future, pred_future, pred_len, variate_indices, save_path
+    ):
+        """
+        Overview plot: per-variate next-patch prediction with context.
+
+        For each variate, shows:
+          - Context (before boundary): gray
+          - Ground truth future: blue
+          - Predicted future: coral/dashed
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        n_vars = len(variate_indices)
+        fig, axes = plt.subplots(n_vars, 1, figsize=(14, 2.2 * n_vars), sharex=True)
+        if n_vars == 1:
+            axes = [axes]
+
+        ctx_len = context.shape[0]
+        t_ctx = np.arange(ctx_len)
+        t_fut = np.arange(ctx_len, ctx_len + pred_len)
+
+        for ax, idx in zip(axes, variate_indices):
+            # Context (last 60 frames for visibility, or all if shorter)
+            vis_start = max(0, ctx_len - 60)
+            ax.plot(
+                t_ctx[vis_start:],
+                context[vis_start:, idx],
+                color="gray",
+                linewidth=1.2,
+                alpha=0.6,
+                label="Context",
+            )
+            # Boundary marker
+            ax.axvline(x=ctx_len - 0.5, color="black", linestyle=":", linewidth=1, alpha=0.5)
+            # Ground truth future
+            ax.plot(
+                t_fut,
+                target_future[:, idx],
+                color="steelblue",
+                linewidth=1.5,
+                label="GT Future",
+            )
+            # Predicted future
+            ax.plot(
+                t_fut,
+                pred_future[:, idx],
+                color="coral",
+                linewidth=1.5,
+                linestyle="--",
+                label="Predicted",
+            )
+            ax.set_ylabel(f"Var {idx}", fontsize=8)
+            if idx == variate_indices[0]:
+                ax.legend(loc="upper right", fontsize=7)
+            ax.grid(True, alpha=0.3)
+
+        axes[-1].set_xlabel("Frame", fontsize=10)
+        fig.suptitle(
+            f"Next-Patch Prediction (pred_len={pred_len})", fontsize=12
+        )
+        plt.tight_layout()
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        plt.close()
+
+    def _plot_next_patch_variate(
+        self, context, target_future, pred_future, variate_idx, pred_len, save_path
+    ):
+        """
+        Single-variate next-patch prediction plot with detailed view.
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        ctx_len = len(context)
+        vis_start = max(0, ctx_len - 80)
+        t_ctx = np.arange(vis_start, ctx_len)
+        t_fut = np.arange(ctx_len, ctx_len + pred_len)
+
+        fig, ax = plt.subplots(figsize=(12, 3.5))
+        ax.plot(
+            t_ctx,
+            context[vis_start:],
+            color="gray",
+            linewidth=1.2,
+            alpha=0.6,
+            label="Context",
+        )
+        ax.axvline(
+            x=ctx_len - 0.5, color="black", linestyle=":", linewidth=1, alpha=0.5,
+            label="Boundary",
+        )
+        ax.plot(
+            t_fut,
+            target_future,
+            color="steelblue",
+            linewidth=1.5,
+            label="GT Future",
+        )
+        ax.plot(
+            t_fut,
+            pred_future,
+            color="coral",
+            linewidth=1.5,
+            linestyle="--",
+            label="Predicted",
+        )
+
+        mse = np.mean((target_future - pred_future) ** 2)
+        ax.set_title(
+            f"Variate {variate_idx} — Next-Patch (pred_len={pred_len}, MSE={mse:.4f})",
+            fontsize=11,
+        )
+        ax.set_xlabel("Frame")
+        ax.set_ylabel("Value")
+        ax.legend(loc="upper right", fontsize=9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        plt.close()
 
     def _plot_reconstruction(self, target, pred, mask, variate_indices, save_path):
         """

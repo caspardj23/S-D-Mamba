@@ -1,12 +1,18 @@
 #!/bin/bash
 # ==============================================================================
-# MAE Pre-Training on Haskins EMA Data
+# S-Mamba MAE Pre-Training on Haskins EMA Data (v2)
 #
 # Self-supervised pre-training using masked frame prediction.
 # Block masking with configurable mask_ratio and block_size.
 #
+# v2 changes:
+#   - 24 variates (position only, no rotation) via ema_6_pos.csv
+#   - Speaker-interleaved train/val/test split (Dataset_Haskins_MAE)
+#   - Configurable stride to avoid stride-1 redundancy
+#   - Updated hyperparameters for smaller effective dataset
+#
 # All parameters can be overridden via environment variables, e.g.:
-#   TRAIN_EPOCHS=30 MASK_RATIO=0.5 bash S_Mamba_MAE_pretrain.sh
+#   TRAIN_EPOCHS=50 MASK_RATIO=0.4 bash S_Mamba_MAE_pretrain.sh
 #
 # After pre-training, the encoder checkpoint is saved at:
 #   ./checkpoints/<setting>/encoder_checkpoint.pth
@@ -14,53 +20,85 @@
 
 export CUDA_VISIBLE_DEVICES=0
 
-# --- Configurable via environment variable ---
-TRAIN_EPOCHS=${TRAIN_EPOCHS:-30}
+# --- Configurable via environment variables ---
+TRAIN_EPOCHS=${TRAIN_EPOCHS:-50}
+D_MODEL=${D_MODEL:-128}
+E_LAYERS=${E_LAYERS:-3}
+D_FF=${D_FF:-256}
+D_STATE=${D_STATE:-32}
+D_CONV_TEMPORAL=${D_CONV_TEMPORAL:-4}
+EXPAND_TEMPORAL=${EXPAND_TEMPORAL:-2}
+DROPOUT=${DROPOUT:-0.2}
+LR=${LR:-0.0003}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+MASK_RATIO=${MASK_RATIO:-0.4}
+BLOCK_SIZE=${BLOCK_SIZE:-8}
+BATCH_SIZE=${BATCH_SIZE:-64}
+SEQ_LEN=${SEQ_LEN:-384}
+PATIENCE=${PATIENCE:-50}
+MAE_STRIDE=${MAE_STRIDE:-192}
+ENC_IN=${ENC_IN:-24}
+ALPHA_MASK=${ALPHA_MASK:-1.0}
+BETA_NEXT=${BETA_NEXT:-0.0}
+GAMMA_SPECTRAL=${GAMMA_SPECTRAL:-0.0}
 
 model_name=S_Mamba_MAE
 
 echo "============================================"
-echo "MAE Pre-Training on Haskins EMA"
+echo "S-Mamba MAE Pre-Training on Haskins EMA (v2)"
+echo "  variates=${ENC_IN} (position only)"
 echo "  epochs=${TRAIN_EPOCHS}"
-echo "  mask_ratio=0.4, block_size=8"
+echo "  d_model=${D_MODEL}, e_layers=${E_LAYERS}"
+echo "  d_ff=${D_FF}, d_state=${D_STATE}"
+echo "  d_conv_temporal=${D_CONV_TEMPORAL}, expand_temporal=${EXPAND_TEMPORAL}"
+echo "  lr=${LR}, weight_decay=${WEIGHT_DECAY}, dropout=${DROPOUT}"
+echo "  mask_ratio=${MASK_RATIO}, block_size=${BLOCK_SIZE}"
+echo "  batch_size=${BATCH_SIZE}, seq_len=${SEQ_LEN}"
+echo "  mae_stride=${MAE_STRIDE}"
+echo "  alpha_mask=${ALPHA_MASK}, beta_next=${BETA_NEXT}, gamma_spectral=${GAMMA_SPECTRAL}"
 echo "============================================"
 
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/haskins/ \
-  --data_path ema_6.csv \
-  --model_id haskins_mae_pretrain \
+  --data_path ema_6_pos.csv \
+  --model_id haskins_mae_pretrain_v2_${TRAIN_EPOCHS}epochs \
   --model $model_name \
-  --data custom \
+  --data haskins_mae \
   --features M \
-  --seq_len 384 \
-  --pred_len 384 \
-  --e_layers 4 \
-  --enc_in 48 \
-  --dec_in 48 \
-  --c_out 48 \
-  --target 47 \
-  --des 'MAE_Pretrain' \
-  --d_model 256 \
-  --d_ff 512 \
-  --d_state 32 \
-  --d_conv_temporal 4 \
-  --expand_temporal 2 \
-  --batch_size 64 \
-  --learning_rate 0.001 \
+  --seq_len $SEQ_LEN \
+  --pred_len $SEQ_LEN \
+  --e_layers $E_LAYERS \
+  --enc_in $ENC_IN \
+  --dec_in $ENC_IN \
+  --c_out $ENC_IN \
+  --target 23 \
+  --des 'MAE_Pretrain_v2' \
+  --d_model $D_MODEL \
+  --d_ff $D_FF \
+  --d_state $D_STATE \
+  --d_conv_temporal $D_CONV_TEMPORAL \
+  --expand_temporal $EXPAND_TEMPORAL \
+  --batch_size $BATCH_SIZE \
+  --learning_rate $LR \
   --train_epochs $TRAIN_EPOCHS \
-  --patience 10 \
+  --patience $PATIENCE \
   --use_norm 0 \
   --loss MSE \
   --exp_name mae_pretrain \
-  --mask_ratio 0.4 \
-  --block_size 8 \
-  --warmup_epochs 5 \
-  --weight_decay 1e-4 \
+  --mask_ratio $MASK_RATIO \
+  --block_size $BLOCK_SIZE \
+  --warmup_epochs 3 \
+  --weight_decay $WEIGHT_DECAY \
   --max_grad_norm 1.0 \
   --use_cosine_scheduler \
-  --dropout 0.1 \
-  --itr 1
+  --dropout $DROPOUT \
+  --mae_stride $MAE_STRIDE \
+  --alpha_mask $ALPHA_MASK \
+  --beta_next $BETA_NEXT \
+  --gamma_spectral $GAMMA_SPECTRAL \
+  --itr 1 \
+  --per_variate_scoring \
 
 echo "============================================"
 echo "Pre-training complete."

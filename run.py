@@ -6,6 +6,8 @@ from experiments.exp_recursive_forecasting import Exp_Recursive_Forecast
 from experiments.exp_speech_forecasting import Exp_Speech_Forecast
 from experiments.exp_mae_pretrain import Exp_MAE_Pretrain
 from experiments.exp_mae_finetune import Exp_MAE_Finetune
+from experiments.exp_patched_mae_pretrain import Exp_Patched_MAE_Pretrain
+from experiments.exp_patched_mae_finetune import Exp_Patched_MAE_Finetune
 import random
 import numpy as np
 
@@ -123,7 +125,7 @@ if __name__ == "__main__":
 
     # optimization
     parser.add_argument(
-        "--num_workers", type=int, default=10, help="data loader num workers"
+        "--num_workers", type=int, default=8, help="data loader num workers"
     )
     parser.add_argument("--itr", type=int, default=1, help="experiments times")
     parser.add_argument("--train_epochs", type=int, default=10, help="train epochs")
@@ -271,6 +273,14 @@ if __name__ == "__main__":
         default=96,
         help="stride for traversing the dataset in recursive experiment",
     )
+    parser.add_argument(
+        "--mae_stride",
+        type=int,
+        default=192,
+        help="window stride for MAE dataset (Dataset_Haskins_MAE). "
+             "Controls overlap between training windows. "
+             "Default 192 = half of seq_len=384 (50%% overlap).",
+    )
 
     # MAE pre-training arguments
     parser.add_argument(
@@ -344,6 +354,32 @@ if __name__ == "__main__":
         help="learning rate for pre-trained encoder (default: 0.1 * learning_rate)",
     )
 
+    # Patched MAE arguments
+    parser.add_argument(
+        "--patch_size",
+        type=int,
+        default=10,
+        help="number of frames per patch for Patched Transformer MAE (default: 10 = 100ms at 100Hz)",
+    )
+    parser.add_argument(
+        "--alpha_mask",
+        type=float,
+        default=1.0,
+        help="weight for masked patch reconstruction loss in Patched MAE pre-training",
+    )
+    parser.add_argument(
+        "--beta_next",
+        type=float,
+        default=1.0,
+        help="weight for next-patch prediction loss in Patched MAE pre-training",
+    )
+    parser.add_argument(
+        "--gamma_spectral",
+        type=float,
+        default=0.0,
+        help="weight for spectral (FFT magnitude) loss in pre-training and fine-tuning",
+    )
+
     args = parser.parse_args()
 
     # Set lr_encoder default if not specified
@@ -371,6 +407,10 @@ if __name__ == "__main__":
         "transformer_mae_finetune",
     ):  # Fine-tune pre-trained MAE for forecasting
         Exp = Exp_MAE_Finetune
+    elif args.exp_name == "patched_mae_pretrain":  # Patched MAE pre-training (Phase 1)
+        Exp = Exp_Patched_MAE_Pretrain
+    elif args.exp_name == "patched_mae_finetune":  # Patched MAE fine-tuning (Phase 2)
+        Exp = Exp_Patched_MAE_Finetune
     elif args.exp_name == "partial_train":  # See Figure 8 of our paper, for the detail
         Exp = Exp_Long_Term_Forecast_Partial
     elif args.exp_name == "speech":  # Speech time series forecasting

@@ -27,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
+from utils.losses import spectral_loss as _spectral_loss
 
 
 class PositionalEncoding(nn.Module):
@@ -131,6 +132,54 @@ class TransformerEncoder(nn.Module):
         return self.norm(x)
 
 
+class NextPatchDecoder(nn.Module):
+    """
+    Next-patch prediction decoder for causal auxiliary pre-training objective.
+
+    Given encoder output at a causal boundary, predicts the next P frames.
+    Uses a small window of encoder states before the boundary to aggregate
+    context, then projects through an MLP to predict future frames.
+    """
+
+    def __init__(self, d_model, enc_in, max_pred_len=96, context_window=16, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.enc_in = enc_in
+        self.max_pred_len = max_pred_len
+        self.context_window = context_window
+
+        self.head = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.LayerNorm(d_model * 2),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 2, d_model * 2),
+            nn.GELU(),
+            nn.LayerNorm(d_model * 2),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 2, max_pred_len * enc_in),
+        )
+
+    def forward(self, encoder_out, boundary_idx, pred_len):
+        """
+        Args:
+            encoder_out: [B, L, d_model]
+            boundary_idx: int — last context position
+            pred_len: int — number of future frames to predict
+
+        Returns:
+            [B, pred_len, enc_in]
+        """
+        B = encoder_out.shape[0]
+        start = max(0, boundary_idx - self.context_window + 1)
+        context = encoder_out[:, start:boundary_idx + 1, :]  # [B, W, d_model]
+        context = context.mean(dim=1)  # [B, d_model]
+
+        out = self.head(context)  # [B, max_pred_len * enc_in]
+        out = out.view(B, self.max_pred_len, self.enc_in)
+        return out[:, :pred_len, :]
+
+
 class Model(nn.Module):
     """
     Transformer MAE: Masked Autoencoder with Transformer Encoder.
@@ -138,6 +187,12 @@ class Model(nn.Module):
     Pre-training model that learns articulatory representations through
     masked frame prediction on EMA data. Attention can see around masked
     blocks, avoiding the state corruption problem of recurrent models.
+
+    Supports two pre-training objectives:
+      1. Masked reconstruction (standard MAE) — loss on masked positions
+      2. Next-patch prediction (causal auxiliary) — predict future frames
+
+    Combined loss: alpha_mask * L_mask + beta_next * L_next
 
     Configs:
         enc_in (int): Number of input variates (e.g., 48 for Haskins EMA)
@@ -149,6 +204,8 @@ class Model(nn.Module):
         dropout (float): Dropout rate (default 0.2)
         mask_ratio (float): Fraction of frames to mask (default 0.4)
         block_size (int): Size of contiguous masked blocks (default 8)
+        alpha_mask (float): Weight for masked reconstruction loss (default 1.0)
+        beta_next (float): Weight for next-patch prediction loss (default 0.0)
     """
 
     def __init__(self, configs):
@@ -160,6 +217,11 @@ class Model(nn.Module):
         # MAE-specific config
         self.mask_ratio = getattr(configs, "mask_ratio", 0.4)
         self.block_size = getattr(configs, "block_size", 8)
+
+        # Loss weighting
+        self.alpha_mask = getattr(configs, "alpha_mask", 1.0)
+        self.beta_next = getattr(configs, "beta_next", 0.0)
+        self.gamma_spectral = getattr(configs, "gamma_spectral", 0.0)
 
         # Encoder config
         n_layers = getattr(configs, "e_layers", 3)
@@ -199,6 +261,18 @@ class Model(nn.Module):
             nn.Linear(decoder_dim, self.enc_in),
         )
 
+        # --- Next-patch prediction decoder (auxiliary causal objective) ---
+        if self.beta_next > 0:
+            self.next_patch_decoder = NextPatchDecoder(
+                d_model=self.d_model,
+                enc_in=self.enc_in,
+                max_pred_len=96,
+                context_window=16,
+                dropout=dropout,
+            )
+        else:
+            self.next_patch_decoder = None
+
         # Initialize weights
         self._init_weights()
         self._print_param_count()
@@ -219,11 +293,13 @@ class Model(nn.Module):
         encoder_params = sum(p.numel() for p in self.encoder.parameters())
         decoder_params = sum(p.numel() for p in self.decoder.parameters())
         proj_params = sum(p.numel() for p in self.input_proj.parameters())
+        np_params = sum(p.numel() for p in self.next_patch_decoder.parameters()) if self.next_patch_decoder else 0
         print(
             f"[Transformer_MAE] Total: {total:,} | "
             f"Encoder: {encoder_params:,} | Decoder: {decoder_params:,} | "
-            f"InputProj: {proj_params:,} | "
-            f"mask_ratio={self.mask_ratio} block_size={self.block_size}"
+            f"InputProj: {proj_params:,} | NextPatch: {np_params:,} | "
+            f"mask_ratio={self.mask_ratio} block_size={self.block_size} "
+            f"alpha={self.alpha_mask} beta={self.beta_next}"
         )
 
     def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, mask=None):
@@ -237,7 +313,9 @@ class Model(nn.Module):
 
         Returns:
             dict with keys:
-                'loss': scalar MSE loss on masked positions
+                'loss': combined loss (alpha * mask_loss + beta * next_loss)
+                'loss_mask': MSE loss on masked positions
+                'loss_next': MSE loss on next-patch prediction (0 if disabled)
                 'pred': [B, L, N] full reconstruction
                 'mask': [B, L] the mask used
                 'target': [B, L, N] original input
@@ -263,19 +341,44 @@ class Model(nn.Module):
         x = self.pos_enc(x)
 
         # Encode — attention sees all positions, visible tokens inform masked ones
-        x = self.encoder(x)  # [B, L, d_model]
+        encoder_out = self.encoder(x)  # [B, L, d_model]
 
         # Decode to reconstruct
-        pred = self.decoder(x)  # [B, L, N]
+        pred = self.decoder(encoder_out)  # [B, L, N]
 
         # Compute loss on masked positions only
         mask_idx = mask.unsqueeze(-1).expand_as(pred)  # [B, L, N]
         pred_masked = pred[mask_idx].view(-1, N)
         target_masked = target[mask_idx].view(-1, N)
-        loss = F.mse_loss(pred_masked, target_masked)
+        loss_mask = F.mse_loss(pred_masked, target_masked)
+
+        # --- Next-patch prediction (causal auxiliary objective) ---
+        loss_next = torch.tensor(0.0, device=x_enc.device)
+        if self.next_patch_decoder is not None and self.training:
+            pred_len = np.random.choice([24, 48, 96])
+            max_boundary = L - pred_len - 1
+            min_boundary = L // 4
+            if max_boundary > min_boundary:
+                boundary = np.random.randint(min_boundary, max_boundary + 1)
+                target_next = target[:, boundary + 1:boundary + 1 + pred_len, :]
+                pred_next = self.next_patch_decoder(encoder_out, boundary, pred_len)
+                loss_next = F.mse_loss(pred_next, target_next)
+
+        # --- Spectral loss (frequency-domain regularisation) ---
+        loss_spectral = torch.tensor(0.0, device=x_enc.device)
+        if self.gamma_spectral > 0:
+            loss_spectral = _spectral_loss(pred, target)
+
+        # Combined loss
+        loss = (self.alpha_mask * loss_mask
+                + self.beta_next * loss_next
+                + self.gamma_spectral * loss_spectral)
 
         return {
             "loss": loss,
+            "loss_mask": loss_mask,
+            "loss_next": loss_next,
+            "loss_spectral": loss_spectral,
             "pred": pred,
             "mask": mask,
             "target": target,
@@ -308,20 +411,27 @@ class Model(nn.Module):
 
 class FinetuneModel(nn.Module):
     """
-    Transformer MAE Fine-tune Model for Forecasting.
+    Transformer MAE Fine-tune Model for Forecasting (mask-token approach).
 
     Uses the pre-trained Transformer encoder and attaches a forecasting head.
+    Resolves the sequence-length mismatch between pre-training and fine-tuning:
+    the encoder always processes seq_len tokens (same as pre-training), with the
+    last pred_len positions filled by learnable [MASK] tokens instead of real data.
+
     Supports three fine-tuning strategies:
         - 'full': Train everything (encoder + head) with differential LR
         - 'freeze': Freeze encoder, only train forecasting head
         - 'partial': Freeze all but last N encoder layers + head
 
     Architecture:
-        Input [B, L, N]
-          → Input projection → [B, L, d_model]
-          → Positional encoding
-          → Transformer encoder (pre-trained) → [B, L, d_model]
-          → Forecasting head → [B, pred_len, N]
+        Input [B, seq_len, N]
+          → Split: context [B, seq_len-pred_len, N] | target [B, pred_len, N]
+          → Input projection on context → [B, seq_len-pred_len, d_model]
+          → Append pred_len [MASK] tokens → [B, seq_len, d_model]
+          → Positional encoding (1..seq_len, same as pre-training)
+          → Transformer encoder (pre-trained) → [B, seq_len, d_model]
+          → Extract last pred_len positions → [B, pred_len, d_model]
+          → Forecast head MLP → [B, pred_len, N]
     """
 
     def __init__(self, configs):
@@ -359,14 +469,11 @@ class FinetuneModel(nn.Module):
             dropout=dropout,
         )
 
+        # --- Learnable [MASK] token (loaded from pre-training) ---
+        self.mask_token = nn.Parameter(torch.randn(1, 1, self.d_model) * 0.02)
+
         # --- Forecasting head ---
-        self.temporal_pool = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model),
-            nn.GELU(),
-            nn.LayerNorm(self.d_model),
-        )
-        # Learned temporal projection: [B, seq_len, d_model] → [B, pred_len, d_model]
-        self.temporal_proj = nn.Linear(self.seq_len, self.pred_len)
+        # Projects encoder output at masked (future) positions to variate predictions.
         self.forecast_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model),
             nn.GELU(),
@@ -437,6 +544,11 @@ class FinetuneModel(nn.Module):
             )
             print(f"  Error: {e}")
 
+        # Load mask token if available
+        if "mask_token" in encoder_state:
+            self.mask_token.data.copy_(encoder_state["mask_token"])
+            print("[Transformer_MAE_Finetune] Loaded pre-trained mask token")
+
         self._apply_finetune_strategy()
 
     def _apply_finetune_strategy(self):
@@ -475,28 +587,44 @@ class FinetuneModel(nn.Module):
         print(f"[Transformer_MAE_Finetune] Trainable: {trainable:,} / {total:,}")
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
-        """Standard forecasting forward pass."""
+        """
+        Forecasting forward pass using mask-token approach.
+
+        Maintains the same sequence length as pre-training by replacing the last
+        pred_len frames with learnable [MASK] tokens.
+        """
         B, L, N = x_enc.shape
+        input_len = L - self.pred_len
 
         if self.use_norm:
-            means = x_enc.mean(1, keepdim=True).detach()
-            x_enc = x_enc - means
+            context_for_norm = x_enc[:, :input_len, :]
+            means = context_for_norm.mean(1, keepdim=True).detach()
             stdev = torch.sqrt(
-                torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5
+                torch.var(context_for_norm, dim=1, keepdim=True, unbiased=False) + 1e-5
             )
-            x_enc /= stdev
+            x_enc = (x_enc - means) / stdev
 
-        # Encode
-        x = self.input_proj(x_enc)  # [B, L, d_model]
+        # Split: only context is projected and seen by the encoder
+        context = x_enc[:, :input_len, :]  # [B, input_len, N]
+
+        # Project context to d_model
+        x_context = self.input_proj(context)  # [B, input_len, d_model]
+
+        # Create mask tokens for prediction positions
+        mask_tokens = self.mask_token.expand(B, self.pred_len, -1)  # [B, pred_len, d_model]
+
+        # Concatenate: total length = seq_len (same as pre-training)
+        x = torch.cat([x_context, mask_tokens], dim=1)  # [B, seq_len, d_model]
+
+        # Positional encoding + encode
         x = self.pos_enc(x)
-        x = self.encoder(x)  # [B, L, d_model]
+        x = self.encoder(x)  # [B, seq_len, d_model]
 
-        # Temporal pooling + projection
-        x = self.temporal_pool(x)  # [B, L, d_model]
-        x = self.temporal_proj(x.transpose(1, 2)).transpose(
-            1, 2
-        )  # [B, pred_len, d_model]
-        dec_out = self.forecast_head(x)  # [B, pred_len, N]
+        # Extract encoder output at masked (future) positions
+        x_future = x[:, -self.pred_len :, :]  # [B, pred_len, d_model]
+
+        # Project to output variates
+        dec_out = self.forecast_head(x_future)  # [B, pred_len, N]
 
         if self.use_norm:
             dec_out = dec_out * stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1)
@@ -514,12 +642,9 @@ class FinetuneModel(nn.Module):
             list(self.input_proj.parameters())
             + list(self.pos_enc.parameters())
             + list(self.encoder.parameters())
+            + [self.mask_token]
         )
-        head_params = (
-            list(self.temporal_pool.parameters())
-            + list(self.temporal_proj.parameters())
-            + list(self.forecast_head.parameters())
-        )
+        head_params = list(self.forecast_head.parameters())
         return [
             {"params": encoder_params, "lr": lr_encoder},
             {"params": head_params, "lr": lr_head},

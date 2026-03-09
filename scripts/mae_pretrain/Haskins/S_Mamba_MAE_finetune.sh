@@ -1,129 +1,114 @@
 #!/bin/bash
 # ==============================================================================
-# Fine-Tune Pre-Trained MAE Encoder for Forecasting on Haskins EMA
+# S-Mamba MAE Fine-Tuning on Haskins EMA Data (v3)
 #
-# Loads the pre-trained encoder from MAE pre-training and attaches a 
-# forecasting head. Tests three fine-tuning strategies:
-#   1. freeze:  Frozen encoder, only train head
-#   2. partial: Unfreeze last 2 encoder layers + head
-#   3. full:    All params trainable with differential LR
+# Fine-tunes a pre-trained S-Mamba MAE encoder for forecasting.
+# Supports three strategies: full, freeze, partial.
 #
-# Also runs a "scratch" baseline (no pre-training) for comparison.
+# v3 changes (aligned with pre-training v3):
+#   - 24 variates (position only) via ema_6_pos.csv
+#   - Speaker-interleaved train/val/test split (Dataset_Haskins_MAE)
+#   - Configurable stride to avoid stride-1 redundancy
+#   - Hyperparameters matched to pre-trained encoder (d_model=128, e_layers=3)
+#   - Stronger regularization (dropout=0.2, weight_decay=0.01)
 #
-# Prerequisites:
-#   Run S_Mamba_MAE_pretrain.sh first to generate encoder_checkpoint.pth
+# Usage:
+#   # Full fine-tune (default)
+#   ENCODER_CKPT=<path> bash S_Mamba_MAE_finetune.sh
+#
+#   # Frozen encoder
+#   ENCODER_CKPT=<path> STRATEGY=freeze bash S_Mamba_MAE_finetune.sh
+#
+#   # Partial (unfreeze last 2 layers)
+#   ENCODER_CKPT=<path> STRATEGY=partial UNFREEZE=2 bash S_Mamba_MAE_finetune.sh
+#
+#   # Scratch baseline (no pre-training)
+#   STRATEGY=full bash S_Mamba_MAE_finetune.sh
+#
+# All parameters can be overridden via environment variables, e.g.:
+#   TRAIN_EPOCHS=50 PRED_LEN=96 ENCODER_CKPT=<path> bash S_Mamba_MAE_finetune.sh
 # ==============================================================================
 
 export CUDA_VISIBLE_DEVICES=0
 
-# --- Configuration ---
-# Update this path to point to your best pre-trained MAE checkpoint
-# The exact setting name depends on the pretrain run's model_id + config.
-# Find it with: ls ./checkpoints/ | grep mae_pretrain
-PRETRAIN_CKPT_DIR="./checkpoints"
-# This will be set per-run below; you may need to update the exact setting name.
-# Use the helper at the bottom of this file to find the right path.
+# --- Configurable via environment variables ---
+PRED_LEN=${PRED_LEN:-48}
+SEQ_LEN=${SEQ_LEN:-384}
+D_MODEL=${D_MODEL:-128}
+E_LAYERS=${E_LAYERS:-3}
+D_FF=${D_FF:-256}
+D_STATE=${D_STATE:-32}
+D_CONV_TEMPORAL=${D_CONV_TEMPORAL:-4}
+EXPAND_TEMPORAL=${EXPAND_TEMPORAL:-2}
+DROPOUT=${DROPOUT:-0.2}
+LR=${LR:-0.0001}
+LR_ENCODER=${LR_ENCODER:-0.00001}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+STRATEGY=${STRATEGY:-full}
+UNFREEZE=${UNFREEZE:-2}
+TRAIN_EPOCHS=${TRAIN_EPOCHS:-30}
+PATIENCE=${PATIENCE:-50}
+BATCH_SIZE=${BATCH_SIZE:-64}
+MAE_STRIDE=${MAE_STRIDE:-192}
+ENC_IN=${ENC_IN:-24}
+GAMMA_SPECTRAL=${GAMMA_SPECTRAL:-0.0}
 
-# Common args
-SEQ_LEN=384
-PRED_LEN=48
-ENC_IN=48
-D_MODEL=256
-E_LAYERS=4
-D_STATE=32
-BATCH_SIZE=32
-LR=0.0001
-EPOCHS=30
+# Path to pre-trained encoder checkpoint
+ENCODER_CKPT=${ENCODER_CKPT:-""}
 
-# Helper: construct the pre-training setting name to find the checkpoint
-# Format: {model_id}_{model}_{data}_{features}_ft{seq_len}_sl{label_len}_pl{pred_len}_...
-# For the default pretrain config:
-PRETRAIN_SETTING="haskins_mae_pretrain_S_Mamba_MAE_custom_M_ft384_sl48_ll384_pl256_dm8_nh4_el1_dl512_df1_fctimeF_ebTrue_dtMAE_Pretrain_projection_0"
-PRETRAIN_CKPT="${PRETRAIN_CKPT_DIR}/${PRETRAIN_SETTING}/encoder_checkpoint.pth"
+model_name=S_Mamba_MAE_Finetune
 
 echo "============================================"
-echo "Looking for pre-trained checkpoint at:"
-echo "  ${PRETRAIN_CKPT}"
+echo "S-Mamba MAE Fine-Tuning on Haskins EMA (v3)"
+echo "  variates=${ENC_IN} (position only)"
+echo "  pred_len=${PRED_LEN}, strategy=${STRATEGY}"
+echo "  d_model=${D_MODEL}, e_layers=${E_LAYERS}"
+echo "  d_ff=${D_FF}, d_state=${D_STATE}"
+echo "  lr=${LR}, lr_encoder=${LR_ENCODER}"
+echo "  dropout=${DROPOUT}, weight_decay=${WEIGHT_DECAY}"
+echo "  mae_stride=${MAE_STRIDE}"
+if [ -n "${ENCODER_CKPT}" ]; then
+echo "  encoder_ckpt=${ENCODER_CKPT}"
+else
+echo "  encoder_ckpt=NONE (scratch baseline)"
+fi
 echo "============================================"
 
-if [ ! -f "${PRETRAIN_CKPT}" ]; then
-    echo "WARNING: Pre-trained checkpoint not found!"
-    echo "Searching for any encoder checkpoint..."
-    FOUND=$(find ${PRETRAIN_CKPT_DIR} -name "encoder_checkpoint.pth" | head -1)
-    if [ -n "${FOUND}" ]; then
-        PRETRAIN_CKPT="${FOUND}"
-        echo "Using: ${PRETRAIN_CKPT}"
+# Build pre-train checkpoint args
+PRETRAIN_ARGS=""
+if [ -n "${ENCODER_CKPT}" ]; then
+    if [ -f "${ENCODER_CKPT}" ]; then
+        PRETRAIN_ARGS="--pretrain_checkpoint ${ENCODER_CKPT}"
     else
-        echo "No encoder checkpoint found. Run pre-training first!"
-        echo "Running scratch baseline only..."
-        PRETRAIN_CKPT=""
+        echo "WARNING: Encoder checkpoint not found at: ${ENCODER_CKPT}"
+        echo "Searching for any S_Mamba encoder checkpoint..."
+        FOUND=$(find ./checkpoints -name "encoder_checkpoint.pth" -path "*S_Mamba_MAE*" | head -1)
+        if [ -n "${FOUND}" ]; then
+            ENCODER_CKPT="${FOUND}"
+            PRETRAIN_ARGS="--pretrain_checkpoint ${ENCODER_CKPT}"
+            echo "Using: ${ENCODER_CKPT}"
+        else
+            echo "No encoder checkpoint found. Running as scratch baseline."
+        fi
     fi
 fi
 
-# ==============================================================================
-# Experiment 1: Scratch Baseline (no pre-training)
-# ==============================================================================
-echo ""
-echo "============================================"
-echo "Experiment 1: Scratch Baseline (no pre-training)"
-echo "============================================"
-
-python -u run.py \
-  --is_training 1 \
-  --root_path ./dataset/haskins/ \
-  --data_path ema_6.csv \
-  --model_id haskins_mae_ft_scratch_${PRED_LEN} \
-  --model S_Mamba_MAE_Finetune \
-  --data custom \
-  --features M \
-  --seq_len $SEQ_LEN \
-  --pred_len $PRED_LEN \
-  --e_layers $E_LAYERS \
-  --enc_in $ENC_IN \
-  --dec_in $ENC_IN \
-  --c_out $ENC_IN \
-  --target 47 \
-  --des 'Scratch' \
-  --d_model $D_MODEL \
-  --d_ff 512 \
-  --d_state $D_STATE \
-  --d_conv_temporal 4 \
-  --expand_temporal 2 \
-  --batch_size $BATCH_SIZE \
-  --learning_rate $LR \
-  --train_epochs $EPOCHS \
-  --patience 5 \
-  --use_norm 0 \
-  --loss MSE \
-  --exp_name mae_finetune \
-  --finetune_strategy full \
-  --max_grad_norm 1.0 \
-  --dropout 0.1 \
-  --itr 1
-
-# ==============================================================================
-# Skip pre-trained experiments if no checkpoint found
-# ==============================================================================
-if [ -z "${PRETRAIN_CKPT}" ]; then
-    echo "Skipping pre-trained experiments (no checkpoint found)."
-    exit 0
+# Construct model_id
+if [ -n "${PRETRAIN_ARGS}" ]; then
+    MODEL_ID="haskins_mae_ft_v3_${STRATEGY}_pl${PRED_LEN}"
+    DES="MAE_FT_v3_${STRATEGY}"
+else
+    MODEL_ID="haskins_mae_ft_v3_scratch_pl${PRED_LEN}"
+    DES="MAE_FT_v3_scratch"
 fi
 
-# ==============================================================================
-# Experiment 2: Freeze Encoder (only train forecasting head)
-# ==============================================================================
-echo ""
-echo "============================================"
-echo "Experiment 2: Freeze Encoder"
-echo "============================================"
-
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/haskins/ \
-  --data_path ema_6.csv \
-  --model_id haskins_mae_ft_freeze_${PRED_LEN} \
-  --model S_Mamba_MAE_Finetune \
-  --data custom \
+  --data_path ema_6_pos.csv \
+  --model_id $MODEL_ID \
+  --model $model_name \
+  --data haskins_mae \
   --features M \
   --seq_len $SEQ_LEN \
   --pred_len $PRED_LEN \
@@ -131,114 +116,33 @@ python -u run.py \
   --enc_in $ENC_IN \
   --dec_in $ENC_IN \
   --c_out $ENC_IN \
-  --target 47 \
-  --des 'Freeze' \
+  --target 23 \
+  --des $DES \
   --d_model $D_MODEL \
-  --d_ff 512 \
+  --d_ff $D_FF \
   --d_state $D_STATE \
-  --d_conv_temporal 4 \
-  --expand_temporal 2 \
+  --d_conv_temporal $D_CONV_TEMPORAL \
+  --expand_temporal $EXPAND_TEMPORAL \
   --batch_size $BATCH_SIZE \
   --learning_rate $LR \
-  --train_epochs $EPOCHS \
-  --patience 5 \
+  --lr_encoder $LR_ENCODER \
+  --train_epochs $TRAIN_EPOCHS \
+  --patience $PATIENCE \
   --use_norm 0 \
   --loss MSE \
   --exp_name mae_finetune \
-  --pretrain_checkpoint ${PRETRAIN_CKPT} \
-  --finetune_strategy freeze \
+  --finetune_strategy $STRATEGY \
+  --unfreeze_layers $UNFREEZE \
   --max_grad_norm 1.0 \
-  --dropout 0.1 \
-  --itr 1
+  --use_cosine_scheduler \
+  --weight_decay $WEIGHT_DECAY \
+  --dropout $DROPOUT \
+  --mae_stride $MAE_STRIDE \
+  --gamma_spectral $GAMMA_SPECTRAL \
+  --itr 1 \
+  --per_variate_scoring \
+  $PRETRAIN_ARGS
 
-# ==============================================================================
-# Experiment 3: Partial Fine-tuning (unfreeze last 2 layers)
-# ==============================================================================
-echo ""
 echo "============================================"
-echo "Experiment 3: Partial Fine-tuning (last 2 layers)"
-echo "============================================"
-
-python -u run.py \
-  --is_training 1 \
-  --root_path ./dataset/haskins/ \
-  --data_path ema_6.csv \
-  --model_id haskins_mae_ft_partial_${PRED_LEN} \
-  --model S_Mamba_MAE_Finetune \
-  --data custom \
-  --features M \
-  --seq_len $SEQ_LEN \
-  --pred_len $PRED_LEN \
-  --e_layers $E_LAYERS \
-  --enc_in $ENC_IN \
-  --dec_in $ENC_IN \
-  --c_out $ENC_IN \
-  --target 47 \
-  --des 'Partial' \
-  --d_model $D_MODEL \
-  --d_ff 512 \
-  --d_state $D_STATE \
-  --d_conv_temporal 4 \
-  --expand_temporal 2 \
-  --batch_size $BATCH_SIZE \
-  --learning_rate $LR \
-  --train_epochs $EPOCHS \
-  --patience 5 \
-  --use_norm 0 \
-  --loss MSE \
-  --exp_name mae_finetune \
-  --pretrain_checkpoint ${PRETRAIN_CKPT} \
-  --finetune_strategy partial \
-  --unfreeze_layers 2 \
-  --max_grad_norm 1.0 \
-  --dropout 0.1 \
-  --itr 1
-
-# ==============================================================================
-# Experiment 4: Full Fine-tuning (differential LR)
-# ==============================================================================
-echo ""
-echo "============================================"
-echo "Experiment 4: Full Fine-tuning (differential LR)"
-echo "============================================"
-
-python -u run.py \
-  --is_training 1 \
-  --root_path ./dataset/haskins/ \
-  --data_path ema_6.csv \
-  --model_id haskins_mae_ft_full_${PRED_LEN} \
-  --model S_Mamba_MAE_Finetune \
-  --data custom \
-  --features M \
-  --seq_len $SEQ_LEN \
-  --pred_len $PRED_LEN \
-  --e_layers $E_LAYERS \
-  --enc_in $ENC_IN \
-  --dec_in $ENC_IN \
-  --c_out $ENC_IN \
-  --target 47 \
-  --des 'FullFT' \
-  --d_model $D_MODEL \
-  --d_ff 512 \
-  --d_state $D_STATE \
-  --d_conv_temporal 4 \
-  --expand_temporal 2 \
-  --batch_size $BATCH_SIZE \
-  --learning_rate $LR \
-  --lr_encoder 0.00001 \
-  --train_epochs $EPOCHS \
-  --patience 5 \
-  --use_norm 0 \
-  --loss MSE \
-  --exp_name mae_finetune \
-  --pretrain_checkpoint ${PRETRAIN_CKPT} \
-  --finetune_strategy full \
-  --max_grad_norm 1.0 \
-  --dropout 0.1 \
-  --itr 1
-
-echo ""
-echo "============================================"
-echo "All fine-tuning experiments complete!"
-echo "Results in result_mae_finetune.txt"
+echo "Fine-tuning complete."
 echo "============================================"

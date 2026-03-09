@@ -15,6 +15,7 @@ from experiments.exp_basic import Exp_Basic
 from model.S_Mamba_MAE import FinetuneModel as MambaFinetuneModel
 from model.Transformer_MAE import FinetuneModel as TransformerFinetuneModel
 from utils.tools import EarlyStopping, adjust_learning_rate, visual
+from utils.losses import spectral_loss as _spectral_loss
 from utils.metrics import metric
 import torch
 import torch.nn as nn
@@ -67,15 +68,17 @@ class Exp_MAE_Finetune(Exp_Basic):
             param_groups = model.get_param_groups(
                 lr_encoder=lr_encoder, lr_head=lr_head
             )
-            optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+            wd = getattr(self.args, "weight_decay", 1e-4)
+            optimizer = optim.AdamW(param_groups, weight_decay=wd)
             print(
-                f"Using differential LR: encoder={lr_encoder:.2e}, head={lr_head:.2e}"
+                f"Using differential LR: encoder={lr_encoder:.2e}, head={lr_head:.2e}, weight_decay={wd:.1e}"
             )
         else:
+            wd = getattr(self.args, "weight_decay", 1e-4)
             optimizer = optim.AdamW(
                 filter(lambda p: p.requires_grad, self.model.parameters()),
                 lr=self.args.learning_rate,
-                weight_decay=1e-4,
+                weight_decay=wd,
             )
         return optimizer
 
@@ -124,9 +127,10 @@ class Exp_MAE_Finetune(Exp_Basic):
 
                 f_dim = -1 if self.args.features == "MS" else 0
                 outputs = outputs[:, -self.args.pred_len :, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len :, f_dim:].to(self.device)
+                # Target: last pred_len frames of input (the suffix masked by the model)
+                target = batch_x[:, -self.args.pred_len :, f_dim:]
 
-                loss = criterion(outputs, batch_y)
+                loss = criterion(outputs, target)
                 total_loss.append(loss.item())
 
         avg_loss = np.mean(total_loss)
@@ -153,6 +157,9 @@ class Exp_MAE_Finetune(Exp_Basic):
             scaler = torch.cuda.amp.GradScaler()
 
         max_grad_norm = getattr(self.args, "max_grad_norm", 1.0)
+        gamma_spectral = getattr(self.args, "gamma_spectral", 0.0)
+        if gamma_spectral > 0:
+            print(f"Spectral loss enabled: gamma_spectral={gamma_spectral}")
 
         # Optional cosine scheduler
         use_cosine = getattr(self.args, "use_cosine_scheduler", False)
@@ -211,8 +218,11 @@ class Exp_MAE_Finetune(Exp_Basic):
                         )
                         f_dim = -1 if self.args.features == "MS" else 0
                         outputs = outputs[:, -self.args.pred_len :, f_dim:]
-                        batch_y = batch_y[:, -self.args.pred_len :, f_dim:]
-                        loss = criterion(outputs, batch_y)
+                        # Target: last pred_len frames of input (suffix masked by model)
+                        target = batch_x[:, -self.args.pred_len :, f_dim:]
+                        loss = criterion(outputs, target)
+                        if gamma_spectral > 0:
+                            loss = loss + gamma_spectral * _spectral_loss(outputs, target)
 
                     scaler.scale(loss).backward()
                     scaler.unscale_(model_optim)
@@ -225,8 +235,11 @@ class Exp_MAE_Finetune(Exp_Basic):
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                     f_dim = -1 if self.args.features == "MS" else 0
                     outputs = outputs[:, -self.args.pred_len :, f_dim:]
-                    batch_y = batch_y[:, -self.args.pred_len :, f_dim:]
-                    loss = criterion(outputs, batch_y)
+                    # Target: last pred_len frames of input (suffix masked by model)
+                    target = batch_x[:, -self.args.pred_len :, f_dim:]
+                    loss = criterion(outputs, target)
+                    if gamma_spectral > 0:
+                        loss = loss + gamma_spectral * _spectral_loss(outputs, target)
 
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
@@ -450,64 +463,57 @@ class Exp_MAE_Finetune(Exp_Basic):
 
                 f_dim = -1 if self.args.features == "MS" else 0
                 outputs = outputs[:, -self.args.pred_len :, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len :, f_dim:]
+                # Target: last pred_len frames of input (suffix masked by model)
+                target = batch_x[:, -self.args.pred_len :, f_dim:]
 
                 pred = outputs.detach().cpu().numpy()
-                true = batch_y.detach().cpu().numpy()
+                true = target.detach().cpu().numpy()
 
                 preds.append(pred)
                 trues.append(true)
 
-                # Save plots
-                if i % 2000 == 0 or i == 2000:
-                    input_data = batch_x.detach().cpu().numpy()
+                # Save plots at multiple timestamps, all variates at each
+                # Determine which batch indices to plot (evenly spaced, up to 4)
+                n_batches = len(test_loader)
+                plot_at = set()
+                plot_at.add(0)  # always plot first batch
+                if n_batches > 1:
+                    for k in range(1, min(4, n_batches)):
+                        plot_at.add(int(k * (n_batches - 1) / (min(4, n_batches) - 1)))
 
-                    if i % 2000 == 0:
-                        if self.args.enc_in == 80:
-                            plot_idx = 40  # for librivoxspeech
-                        elif self.args.enc_in in (12, 24, 36, 116):
-                            plot_idx = 3  # for mngu0
-                        elif self.args.enc_in == 48:
-                            plot_idx = 7  # for haskins ema 6
-                        else:
-                            plot_idx = 0  # default
+                if i in plot_at:
+                    # Only the context portion (first seq_len - pred_len frames)
+                    input_len = self.args.seq_len - self.args.pred_len
+                    input_data = batch_x[:, :input_len, :].detach().cpu().numpy()
 
+                    # Determine which variates to plot
+                    if self.args.enc_in == 80:
+                        plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]
+                    elif self.args.enc_in == 36:
+                        plot_indices = list(range(36))
+                    elif self.args.enc_in == 12:
+                        plot_indices = list(range(12))
+                    elif self.args.enc_in == 24:
+                        plot_indices = list(range(24))
+                    elif self.args.enc_in == 116:
+                        plot_indices = list(range(36)) + list(range(36, 116, 10))
+                    elif self.args.enc_in == 48:
+                        plot_indices = list(range(48))
+                    else:
+                        plot_indices = list(range(min(self.args.enc_in, 24)))
+
+                    for plot_idx in plot_indices:
                         gt = np.concatenate(
                             (input_data[0, :, plot_idx], true[0, :, plot_idx]), axis=0
                         )
                         pd_arr = np.concatenate(
                             (input_data[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
                         )
-                        visual(gt, pd_arr, os.path.join(folder_path, f"{i}.pdf"))
-
-                    if i == 2000:
-                        if self.args.enc_in == 80:
-                            plot_indices = [1, 11, 21, 31, 41, 51, 61, 71, 78, 79]  # for librivoxspeech
-                        elif self.args.enc_in == 36:
-                            plot_indices = list(range(36))  # for mngu0
-                        elif self.args.enc_in == 12:
-                            plot_indices = list(range(12))  # for mngu0 first 12 features
-                        elif self.args.enc_in == 24:
-                            plot_indices = list(range(24))  # for mngu0 first 24 features
-                        elif self.args.enc_in == 116:
-                            plot_indices = list(range(36)) + list(range(36, 116, 10))  # for mngu0 first 36 ema + every 10th msg feature
-                        elif self.args.enc_in == 48:
-                            plot_indices = list(range(48))  # for haskins ema 6
-                        else:
-                            plot_indices = [0, 5, 10, 15, 20]  # default
-
-                        for plot_idx in plot_indices:
-                            gt = np.concatenate(
-                                (input_data[0, :, plot_idx], true[0, :, plot_idx]), axis=0
-                            )
-                            pd_arr = np.concatenate(
-                                (input_data[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
-                            )
-                            visual(
-                                gt,
-                                pd_arr,
-                                os.path.join(folder_path, f"{i}_{plot_idx}.pdf"),
-                            )
+                        visual(
+                            gt,
+                            pd_arr,
+                            os.path.join(folder_path, f"batch{i}_var{plot_idx}.pdf"),
+                        )
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -540,16 +546,47 @@ class Exp_MAE_Finetune(Exp_Basic):
 
         # W&B test metrics
         if self.use_wandb:
+            import wandb
+
             test_metrics = {
                 "test/mse": mse_val,
                 "test/mae": mae_val,
                 "test/rmse": rmse_val,
                 "test/r2": r2_val,
             }
-            for vi, v_mse in enumerate(per_variate_mse):
-                test_metrics[f"test/variate_{vi}_mse"] = v_mse
-            for vi, v_r2 in enumerate(per_variate_r2):
-                test_metrics[f"test/variate_{vi}_r2"] = v_r2
+            self._wandb_log(test_metrics)
+
+            N_vars = per_variate_mse.shape[0]
+            variates = np.arange(N_vars)
+
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            def _make_vbar(values, title, ylabel, color="steelblue"):
+                fig, ax = plt.subplots(figsize=(max(8, N_vars * 0.35), 4))
+                ax.bar(variates, values, color=color, width=0.8)
+                ax.set_xlabel("Variate")
+                ax.set_ylabel(ylabel)
+                ax.set_title(title)
+                ax.set_xticks(variates)
+                ax.set_xticklabels(variates, fontsize=max(4, 8 - N_vars // 20))
+                ax.grid(True, alpha=0.3, axis="y")
+                plt.tight_layout()
+                img = wandb.Image(fig)
+                plt.close(fig)
+                return img
+
+            test_metrics["test/per_variate_r2"] = _make_vbar(
+                per_variate_r2, "Per-Variate R2", "R2"
+            )
+            test_metrics["test/per_variate_mse"] = _make_vbar(
+                per_variate_mse, "Per-Variate MSE", "MSE", color="coral"
+            )
+            test_metrics["test/per_variate_mae"] = _make_vbar(
+                per_variate_mae, "Per-Variate MAE", "MAE", color="coral"
+            )
+
             self._wandb_log(test_metrics)
 
         f = open("result_mae_finetune.txt", "a")
