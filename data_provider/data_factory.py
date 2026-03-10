@@ -6,6 +6,7 @@ from data_provider.data_loader import (
     Dataset_PEMS,
     Dataset_Pred,
     Dataset_Haskins_MAE,
+    Dataset_Haskins_Forecast,
 )
 from torch.utils.data import DataLoader
 
@@ -18,6 +19,7 @@ data_dict = {
     "PEMS": Dataset_PEMS,
     "custom": Dataset_Custom,
     "haskins_mae": Dataset_Haskins_MAE,
+    "haskins_forecast": Dataset_Haskins_Forecast,
 }
 
 
@@ -60,7 +62,7 @@ def data_provider(args, flag):
     )
     # Pass stride to Dataset_Haskins_MAE if applicable
     if args.data == "haskins_mae":
-        data_kwargs["stride"] = getattr(args, "mae_stride", 192)
+        data_kwargs["stride"] = getattr(args, "mae_stride", 80)
 
     data_set = Data(**data_kwargs)
     print(flag, len(data_set))

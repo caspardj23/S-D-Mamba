@@ -643,17 +643,18 @@ class Dataset_Pred(Dataset):
 
 class Dataset_Haskins_MAE(Dataset):
     """
-    Haskins EMA dataset with speaker-interleaved splitting and configurable stride.
+    Haskins EMA dataset with sentence-aware splitting and windowing.
 
-    Designed for MAE pre-training on concatenated multi-speaker EMA data.
-    Solves two problems with the generic Dataset_Custom:
-      1. Speaker bias: speakers concatenated sequentially means a chronological
-         70/10/20 split puts different speakers in different splits. This class
-         detects speaker boundaries and distributes each speaker's data across
-         train/val/test proportionally.
-      2. Stride-1 redundancy: with seq_len=384 and stride=1, adjacent windows
-         overlap 99.7%. This class uses a configurable stride (default=192)
-         to produce non-redundant training windows.
+    Expects a CSV with columns: sentence_id, speaker_id, time_s, 0, 1, ..., N
+    Each sentence is a separate utterance identified by sentence_id.
+
+    Key design decisions:
+      1. Splitting at the sentence level: for each speaker, 70% of sentences go
+         to train, 10% to val, 20% to test. No sentence is split across sets.
+      2. Windows stay within sentences: no window ever crosses a sentence boundary,
+         so the model never sees discontinuous articulation.
+      3. Window size = seq_len only: both MAE pretrain (which ignores batch_y) and
+         finetune (which carves the target from batch_x) only need seq_len frames.
 
     Args:
         root_path: Directory containing the CSV
@@ -665,7 +666,7 @@ class Dataset_Haskins_MAE(Dataset):
         scale: whether to apply StandardScaler (fit on train split)
         timeenc: time encoding type
         freq: frequency string
-        stride: window stride in frames (default 192 = half of seq_len=384)
+        stride: window stride in frames (default 80)
     """
 
     def __init__(
@@ -674,17 +675,17 @@ class Dataset_Haskins_MAE(Dataset):
         flag="train",
         size=None,
         features="M",
-        data_path="ema_6_pos.csv",
-        target="22",
+        data_path="ema_8_pos_xz.csv",
+        target="15",
         scale=True,
         timeenc=1,
         freq="h",
-        stride=192,
+        stride=80,
     ):
         if size is None:
-            self.seq_len = 384
-            self.label_len = 48
-            self.pred_len = 384
+            self.seq_len = 160
+            self.label_len = 0
+            self.pred_len = 160
         else:
             self.seq_len = size[0]
             self.label_len = size[1]
@@ -703,120 +704,235 @@ class Dataset_Haskins_MAE(Dataset):
 
         self.__read_data__()
 
-    # Known speaker boundary timestamps (from Haskins HPRC corpus)
-    # The CSV is one continuous time series with no resets.
-    SPEAKER_BOUNDARIES = [
-        # (speaker, start_time, end_time) as "HH:MM:SS.mmm"
-        ("F01", "00:00:00.000", "00:39:52.570"),
-        ("F03", "00:39:52.580", "01:15:27.920"),
-        ("F04", "01:15:27.930", "01:51:57.880"),
-        ("M01", "01:51:57.890", "02:26:24.760"),
-        ("M02", "02:26:24.770", "03:02:04.880"),
-        ("M04", "03:02:04.890", "03:38:23.610"),
-    ]
-
-    def _detect_speaker_segments(self, timestamps):
-        """
-        Map speaker boundaries to row indices using known timestamps.
-
-        Returns list of (start_idx, end_idx) for each speaker segment.
-        Uses the known HPRC speaker boundary timestamps to find the
-        corresponding row indices in the continuous time series.
-        """
-        # Parse timestamps to seconds
-        times = pd.to_timedelta(timestamps).dt.total_seconds().values
-
-        segments = []
-        for speaker, t_start, t_end in self.SPEAKER_BOUNDARIES:
-            start_sec = pd.to_timedelta(t_start).total_seconds()
-            end_sec = pd.to_timedelta(t_end).total_seconds()
-
-            # Find first index >= start_sec and last index <= end_sec
-            idx_start = int(np.searchsorted(times, start_sec, side="left"))
-            idx_end = int(np.searchsorted(times, end_sec, side="right"))
-
-            if idx_start < idx_end:
-                segments.append((idx_start, idx_end))
-
-        return segments
-
     def __read_data__(self):
         self.scaler = StandardScaler()
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
-        # Extract data columns (all columns except 'date')
+        # Extract feature columns (everything except metadata)
+        meta_cols = {"sentence_id", "speaker_id", "time_s", "date"}
         if self.features == "M" or self.features == "MS":
-            cols_data = df_raw.columns[1:]
-            df_data = df_raw[cols_data]
+            feature_cols = [c for c in df_raw.columns if c not in meta_cols]
         elif self.features == "S":
-            df_data = df_raw[[self.target]]
+            feature_cols = [self.target]
 
-        all_data = df_data.values  # [total_rows, num_variates]
+        all_data = df_raw[feature_cols].values.astype(np.float32)
+        sentence_ids = df_raw["sentence_id"].values
+        speaker_ids = df_raw["speaker_id"].values
 
-        # --- Detect speaker segments ---
-        speaker_segments = self._detect_speaker_segments(df_raw["date"])
-        n_speakers = len(speaker_segments)
-        print(f"  [Dataset_Haskins_MAE] Detected {n_speakers} speaker segments: "
-              f"{[(s, e, e-s) for s, e in speaker_segments]}")
+        # Build sentence table: sentence_id → (start_row, end_row, speaker)
+        sentences = {}
+        for sid in np.unique(sentence_ids):
+            rows = np.where(sentence_ids == sid)[0]
+            sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]])
 
-        # --- Speaker-interleaved splitting ---
-        # For each speaker, take 70% train, 10% val, 20% test (from their data)
-        train_indices = []
-        val_indices = []
-        test_indices = []
+        # Group sentences by speaker
+        speaker_sentences = defaultdict(list)
+        for sid, (start, end, speaker) in sentences.items():
+            speaker_sentences[speaker].append((sid, start, end))
 
-        for seg_start, seg_end in speaker_segments:
-            seg_len = seg_end - seg_start
-            n_train = int(seg_len * 0.7)
-            n_test = int(seg_len * 0.2)
-            n_val = seg_len - n_train - n_test
+        # Sort by sentence_id within each speaker for reproducibility
+        for speaker in speaker_sentences:
+            speaker_sentences[speaker].sort(key=lambda x: x[0])
 
-            train_indices.append((seg_start, seg_start + n_train))
-            val_indices.append((seg_start + n_train, seg_start + n_train + n_val))
-            test_indices.append((seg_start + n_train + n_val, seg_end))
+        # Split sentences per speaker: 70% train, 10% val, 20% test
+        train_sents = []
+        val_sents = []
+        test_sents = []
 
-        # --- Fit scaler on training data from ALL speakers ---
+        for speaker, sents in sorted(speaker_sentences.items()):
+            n = len(sents)
+            n_train = int(n * 0.7)
+            n_test = int(n * 0.2)
+            n_val = n - n_train - n_test
+
+            train_sents.extend(sents[:n_train])
+            val_sents.extend(sents[n_train:n_train + n_val])
+            test_sents.extend(sents[n_train + n_val:])
+
+        # Fit scaler on training sentences only
         if self.scale:
-            train_chunks = [all_data[s:e] for s, e in train_indices]
+            train_chunks = [all_data[s:e] for _, s, e in train_sents]
             train_all = np.concatenate(train_chunks, axis=0)
             self.scaler.fit(train_all)
             all_data = self.scaler.transform(all_data)
 
-        # --- Select indices for this split ---
+        # Select sentences for this split
         if self.flag == "train":
-            split_indices = train_indices
+            split_sents = train_sents
         elif self.flag == "val":
-            split_indices = val_indices
+            split_sents = val_sents
         else:
-            split_indices = test_indices
+            split_sents = test_sents
 
-        # --- Build window start positions with stride, respecting segment boundaries ---
-        # Windows must not cross speaker boundaries
+        # Build window start positions within sentences
         window_starts = []
-        window_len = self.seq_len + self.pred_len  # total span needed per window
+        window_len = self.seq_len  # only need seq_len frames per window
+        skipped = 0
 
-        for seg_start, seg_end in split_indices:
-            seg_data_len = seg_end - seg_start
-            if seg_data_len < window_len:
-                continue  # skip segments too short for even one window
-            n_windows = (seg_data_len - window_len) // self.stride + 1
+        for sid, seg_start, seg_end in split_sents:
+            seg_len = seg_end - seg_start
+            if seg_len < window_len:
+                skipped += 1
+                continue
+            n_windows = (seg_len - window_len) // self.stride + 1
             for w in range(n_windows):
                 window_starts.append(seg_start + w * self.stride)
 
         self.window_starts = np.array(window_starts, dtype=np.int64)
         self.all_data = all_data
 
-        # Build dummy time stamps (MAE doesn't use them, but interface requires them)
-        # Use simple sequential indices
+        # Dummy timestamps (interface required, not used by MAE)
         self.data_stamp = np.zeros((len(all_data), 4), dtype=np.float32)
 
-        n_total_windows = sum(
-            max(0, (e - s - window_len) // self.stride + 1)
-            for s, e in (train_indices if self.flag != "test" else test_indices)
-            if (e - s) >= window_len
-        )
-        print(f"  [Dataset_Haskins_MAE] {self.flag}: {len(self.window_starts)} windows "
-              f"(stride={self.stride}, seq_len={self.seq_len}, pred_len={self.pred_len})")
+        n_speakers = len(speaker_sentences)
+        print(f"  [Dataset_Haskins_MAE] {n_speakers} speakers, "
+              f"{len(sentences)} total sentences, "
+              f"{len(all_data)} total frames, "
+              f"{all_data.shape[1]} variates")
+        print(f"  [Dataset_Haskins_MAE] {self.flag}: {len(split_sents)} sentences, "
+              f"{len(self.window_starts)} windows "
+              f"(stride={self.stride}, seq_len={self.seq_len}, skipped={skipped})")
+
+    def __getitem__(self, index):
+        start = self.window_starts[index]
+        s_end = start + self.seq_len
+
+        seq_x = self.all_data[start:s_end]
+        seq_y = seq_x  # target carved from seq_x in experiment code
+        seq_x_mark = self.data_stamp[start:s_end]
+        seq_y_mark = seq_x_mark
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+
+    def __len__(self):
+        return len(self.window_starts)
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
+
+
+class Dataset_Haskins_Forecast(Dataset):
+    """
+    Haskins EMA dataset for multivariate forecasting with sentence-aware splitting.
+
+    Expects a CSV with columns: sentence_id, speaker_id, time_s, 0, 1, ..., N
+    Windows never cross sentence boundaries (no discontinuous articulation).
+
+    Splitting: per speaker, 70% train / 10% val / 20% test at sentence level.
+    """
+
+    def __init__(
+        self,
+        root_path,
+        flag="train",
+        size=None,
+        features="M",
+        data_path="ema_8_pos_xz.csv",
+        target="15",
+        scale=True,
+        timeenc=1,
+        freq="h",
+        stride=1,
+    ):
+        if size is None:
+            self.seq_len = 96
+            self.label_len = 48
+            self.pred_len = 24
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
+
+        assert flag in ["train", "val", "test"]
+        self.flag = flag
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.timeenc = timeenc
+        self.freq = freq
+        self.root_path = root_path
+        self.data_path = data_path
+        self.stride = stride
+
+        self.__read_data__()
+
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+
+        meta_cols = {"sentence_id", "speaker_id", "time_s", "date"}
+        if self.features == "M" or self.features == "MS":
+            feature_cols = [c for c in df_raw.columns if c not in meta_cols]
+        elif self.features == "S":
+            feature_cols = [self.target]
+
+        all_data = df_raw[feature_cols].values.astype(np.float32)
+        sentence_ids = df_raw["sentence_id"].values
+        speaker_ids = df_raw["speaker_id"].values
+
+        # Build sentence table: sentence_id → (start_row, end_row, speaker)
+        sentences = {}
+        for sid in np.unique(sentence_ids):
+            rows = np.where(sentence_ids == sid)[0]
+            sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]])
+
+        # Group sentences by speaker
+        speaker_sentences = defaultdict(list)
+        for sid, (start, end, speaker) in sentences.items():
+            speaker_sentences[speaker].append((sid, start, end))
+
+        for speaker in speaker_sentences:
+            speaker_sentences[speaker].sort(key=lambda x: x[0])
+
+        # Split sentences per speaker: 70% train, 10% val, 20% test
+        train_sents, val_sents, test_sents = [], [], []
+        for speaker, sents in sorted(speaker_sentences.items()):
+            n = len(sents)
+            n_train = int(n * 0.7)
+            n_test = int(n * 0.2)
+            n_val = n - n_train - n_test
+            train_sents.extend(sents[:n_train])
+            val_sents.extend(sents[n_train:n_train + n_val])
+            test_sents.extend(sents[n_train + n_val:])
+
+        # Fit scaler on training sentences only
+        if self.scale:
+            train_chunks = [all_data[s:e] for _, s, e in train_sents]
+            train_all = np.concatenate(train_chunks, axis=0)
+            self.scaler.fit(train_all)
+            all_data = self.scaler.transform(all_data)
+
+        if self.flag == "train":
+            split_sents = train_sents
+        elif self.flag == "val":
+            split_sents = val_sents
+        else:
+            split_sents = test_sents
+
+        # Build window start positions; each window spans seq_len + pred_len frames
+        window_len = self.seq_len + self.pred_len
+        window_starts = []
+        skipped = 0
+        for sid, seg_start, seg_end in split_sents:
+            seg_len = seg_end - seg_start
+            if seg_len < window_len:
+                skipped += 1
+                continue
+            n_windows = (seg_len - window_len) // self.stride + 1
+            for w in range(n_windows):
+                window_starts.append(seg_start + w * self.stride)
+
+        self.window_starts = np.array(window_starts, dtype=np.int64)
+        self.all_data = all_data
+        self.data_stamp = np.zeros((len(all_data), 4), dtype=np.float32)
+
+        n_speakers = len(speaker_sentences)
+        print(f"  [Dataset_Haskins_Forecast] {n_speakers} speakers, "
+              f"{len(sentences)} total sentences, "
+              f"{all_data.shape[1]} variates")
+        print(f"  [Dataset_Haskins_Forecast] {self.flag}: {len(split_sents)} sentences, "
+              f"{len(self.window_starts)} windows "
+              f"(stride={self.stride}, seq_len={self.seq_len}, pred_len={self.pred_len}, skipped={skipped})")
 
     def __getitem__(self, index):
         start = self.window_starts[index]

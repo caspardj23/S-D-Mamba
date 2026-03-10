@@ -295,6 +295,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
+        N = self.args.enc_in  # number of variates
+
         self.model.eval()
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
@@ -371,7 +373,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
-                if i % 2000 == 0 or i == 2000:
+                if i % 5000 == 0:
                     input = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
                         shape = input.shape
@@ -379,82 +381,22 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             shape
                         )
 
-                    # if i % 20 == 0: # for lots of plot
-                    if i % 2000 == 0:  # for less plots.
-                        # Feature index to plot. -1 corresponds to the target feature specified in arguments.
-                        # Change this index to plot other features (0 to feature_dim-1)
-                        if self.args.enc_in == 80:
-                            plot_idx = 40  # for librivoxspeech
-                        elif (
-                            self.args.enc_in == 12
-                            or self.args.enc_in == 24
-                            or self.args.enc_in == 36
-                            or self.args.enc_in == 116
-                        ):
-                            plot_idx = 3  # for mngu0
-                        elif self.args.enc_in == 48:
-                            plot_idx = 7  # for haskins ema 6
-                        else:
-                            plot_idx = 0  # default
+                    plot_indices = list(range(N))  # default
 
+                    for plot_idx in plot_indices:
                         gt = np.concatenate(
                             (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
                         )
                         pd = np.concatenate(
                             (input[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
                         )
-                        visual(gt, pd, os.path.join(folder_path, str(i) + ".pdf"))
-
-                    if i == 2000:
-                        # Feature indices to plot.
-                        # plot_indices = [0, 5, 10, 15, 20]  # for weather
-
-                        if self.args.enc_in == 80:
-                            plot_indices = [
-                                1,
-                                11,
-                                21,
-                                31,
-                                41,
-                                51,
-                                61,
-                                71,
-                                78,
-                                79,
-                            ]  # for librivoxspeech
-                        elif self.args.enc_in == 36:
-                            plot_indices = list(range(36))  # for mngu0
-                        elif self.args.enc_in == 12:
-                            plot_indices = list(
-                                range(12)
-                            )  # for mngu0 first 12 features
-                        elif self.args.enc_in == 24:
-                            plot_indices = list(
-                                range(24)
-                            )  # for mngu0 first 24 features
-                        elif self.args.enc_in == 116:
-                            plot_indices = list(range(36)) + list(
-                                range(36, 116, 10)
-                            )  # for mngu0 first 36 ema features + every 10th feature from the msg
-                        elif self.args.enc_in == 48:
-                            plot_indices = list(range(48))  # for haskins ema 6
-                        else:
-                            plot_indices = [0, 5, 10, 15, 20]  # default
-
-                        for plot_idx in plot_indices:
-                            gt = np.concatenate(
-                                (input[0, :, plot_idx], true[0, :, plot_idx]), axis=0
-                            )
-                            pd = np.concatenate(
-                                (input[0, :, plot_idx], pred[0, :, plot_idx]), axis=0
-                            )
-                            visual(
-                                gt,
-                                pd,
-                                os.path.join(
-                                    folder_path, str(i) + "_" + str(plot_idx) + ".pdf"
-                                ),
-                            )
+                        visual(
+                            gt,
+                            pd,
+                            os.path.join(
+                                folder_path, str(i) + "_" + str(plot_idx) + ".pdf"
+                            ),
+                        )
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -490,6 +432,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             print("Per-variate MSE: {}".format(per_variate_mse))
             per_variate_mae = np.mean(np.abs(preds - trues), axis=(0, 1))
             print("Per-variate MAE: {}".format(per_variate_mae))
+            # Calculate per-variate R2 score (inline)
+            ss_res = np.sum((trues - preds) ** 2, axis=(0, 1))
+            ss_tot = np.sum((trues - np.mean(trues, axis=(0, 1))) ** 2, axis=(0, 1))
+            per_variate_r2 = 1 - ss_res / ss_tot
+            print("Per-variate R2: {}".format(per_variate_r2))
 
         f = open("result_long_term_forecast.txt", "a")
         f.write(setting + "  \n")

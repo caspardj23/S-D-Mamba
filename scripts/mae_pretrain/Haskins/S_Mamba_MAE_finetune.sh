@@ -1,16 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-# S-Mamba MAE Fine-Tuning on Haskins EMA Data (v3)
+# S-Mamba MAE Fine-Tuning on Haskins EMA Data (v4)
 #
 # Fine-tunes a pre-trained S-Mamba MAE encoder for forecasting.
 # Supports three strategies: full, freeze, partial.
 #
-# v3 changes (aligned with pre-training v3):
-#   - 24 variates (position only) via ema_6_pos.csv
-#   - Speaker-interleaved train/val/test split (Dataset_Haskins_MAE)
-#   - Configurable stride to avoid stride-1 redundancy
-#   - Hyperparameters matched to pre-trained encoder (d_model=128, e_layers=3)
-#   - Stronger regularization (dropout=0.2, weight_decay=0.01)
+# v4 changes:
+#   - 16 variates (posX + posZ) via ema_8_pos_xz.csv
+#   - 8 speakers (F01-F04, M01-M04)
+#   - Sentence-aware splitting and windowing
+#   - seq_len=160, stride=80
 #
 # Usage:
 #   # Full fine-tune (default)
@@ -26,14 +25,14 @@
 #   STRATEGY=full bash S_Mamba_MAE_finetune.sh
 #
 # All parameters can be overridden via environment variables, e.g.:
-#   TRAIN_EPOCHS=50 PRED_LEN=96 ENCODER_CKPT=<path> bash S_Mamba_MAE_finetune.sh
+#   TRAIN_EPOCHS=50 PRED_LEN=48 ENCODER_CKPT=<path> bash S_Mamba_MAE_finetune.sh
 # ==============================================================================
 
 export CUDA_VISIBLE_DEVICES=0
 
 # --- Configurable via environment variables ---
 PRED_LEN=${PRED_LEN:-48}
-SEQ_LEN=${SEQ_LEN:-384}
+SEQ_LEN=${SEQ_LEN:-160}
 D_MODEL=${D_MODEL:-128}
 E_LAYERS=${E_LAYERS:-3}
 D_FF=${D_FF:-256}
@@ -49,8 +48,8 @@ UNFREEZE=${UNFREEZE:-2}
 TRAIN_EPOCHS=${TRAIN_EPOCHS:-30}
 PATIENCE=${PATIENCE:-50}
 BATCH_SIZE=${BATCH_SIZE:-64}
-MAE_STRIDE=${MAE_STRIDE:-192}
-ENC_IN=${ENC_IN:-24}
+MAE_STRIDE=${MAE_STRIDE:-80}
+ENC_IN=${ENC_IN:-16}
 GAMMA_SPECTRAL=${GAMMA_SPECTRAL:-0.0}
 
 # Path to pre-trained encoder checkpoint
@@ -59,8 +58,8 @@ ENCODER_CKPT=${ENCODER_CKPT:-""}
 model_name=S_Mamba_MAE_Finetune
 
 echo "============================================"
-echo "S-Mamba MAE Fine-Tuning on Haskins EMA (v3)"
-echo "  variates=${ENC_IN} (position only)"
+echo "S-Mamba MAE Fine-Tuning on Haskins EMA (v4)"
+echo "  variates=${ENC_IN} (posX + posZ)"
 echo "  pred_len=${PRED_LEN}, strategy=${STRATEGY}"
 echo "  d_model=${D_MODEL}, e_layers=${E_LAYERS}"
 echo "  d_ff=${D_FF}, d_state=${D_STATE}"
@@ -95,28 +94,29 @@ fi
 
 # Construct model_id
 if [ -n "${PRETRAIN_ARGS}" ]; then
-    MODEL_ID="haskins_mae_ft_v3_${STRATEGY}_pl${PRED_LEN}"
-    DES="MAE_FT_v3_${STRATEGY}"
+    MODEL_ID="haskins_mae_ft_v4_${STRATEGY}_pl${PRED_LEN}"
+    DES="MAE_FT_v4_${STRATEGY}"
 else
-    MODEL_ID="haskins_mae_ft_v3_scratch_pl${PRED_LEN}"
-    DES="MAE_FT_v3_scratch"
+    MODEL_ID="haskins_mae_ft_v4_scratch_pl${PRED_LEN}"
+    DES="MAE_FT_v4_scratch"
 fi
 
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/haskins/ \
-  --data_path ema_6_pos.csv \
+  --data_path ema_8_pos_xz.csv \
   --model_id $MODEL_ID \
   --model $model_name \
   --data haskins_mae \
   --features M \
   --seq_len $SEQ_LEN \
+  --label_len 0 \
   --pred_len $PRED_LEN \
   --e_layers $E_LAYERS \
   --enc_in $ENC_IN \
   --dec_in $ENC_IN \
   --c_out $ENC_IN \
-  --target 23 \
+  --target 15 \
   --des $DES \
   --d_model $D_MODEL \
   --d_ff $D_FF \

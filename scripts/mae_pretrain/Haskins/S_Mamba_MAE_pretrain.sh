@@ -1,15 +1,16 @@
 #!/bin/bash
 # ==============================================================================
-# S-Mamba MAE Pre-Training on Haskins EMA Data (v2)
+# S-Mamba MAE Pre-Training on Haskins EMA Data (v4)
 #
 # Self-supervised pre-training using masked frame prediction.
 # Block masking with configurable mask_ratio and block_size.
 #
-# v2 changes:
-#   - 24 variates (position only, no rotation) via ema_6_pos.csv
-#   - Speaker-interleaved train/val/test split (Dataset_Haskins_MAE)
-#   - Configurable stride to avoid stride-1 redundancy
-#   - Updated hyperparameters for smaller effective dataset
+# v4 changes:
+#   - 16 variates (posX + posZ only) via ema_7_pos_xz.csv
+#   - 8 speakers (F01-F04, M01-M04)
+#   - Sentence-aware splitting and windowing (no cross-sentence windows)
+#   - seq_len=160 (fits all sentences, min=171 frames)
+#   - stride=80 (half seq_len)
 #
 # All parameters can be overridden via environment variables, e.g.:
 #   TRAIN_EPOCHS=50 MASK_RATIO=0.4 bash S_Mamba_MAE_pretrain.sh
@@ -34,19 +35,21 @@ WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 MASK_RATIO=${MASK_RATIO:-0.4}
 BLOCK_SIZE=${BLOCK_SIZE:-8}
 BATCH_SIZE=${BATCH_SIZE:-64}
-SEQ_LEN=${SEQ_LEN:-384}
+SEQ_LEN=${SEQ_LEN:-160}
 PATIENCE=${PATIENCE:-50}
-MAE_STRIDE=${MAE_STRIDE:-192}
-ENC_IN=${ENC_IN:-24}
+MAE_STRIDE=${MAE_STRIDE:-80}
+ENC_IN=${ENC_IN:-16}
 ALPHA_MASK=${ALPHA_MASK:-1.0}
 BETA_NEXT=${BETA_NEXT:-0.0}
 GAMMA_SPECTRAL=${GAMMA_SPECTRAL:-0.0}
+ABLATION_LABEL=${LABEL:-}
+IS_TRAINING=${IS_TRAINING:-1}
 
 model_name=S_Mamba_MAE
 
 echo "============================================"
-echo "S-Mamba MAE Pre-Training on Haskins EMA (v2)"
-echo "  variates=${ENC_IN} (position only)"
+echo "S-Mamba MAE Pre-Training on Haskins EMA (v4)"
+echo "  variates=${ENC_IN} (posX + posZ)"
 echo "  epochs=${TRAIN_EPOCHS}"
 echo "  d_model=${D_MODEL}, e_layers=${E_LAYERS}"
 echo "  d_ff=${D_FF}, d_state=${D_STATE}"
@@ -59,10 +62,10 @@ echo "  alpha_mask=${ALPHA_MASK}, beta_next=${BETA_NEXT}, gamma_spectral=${GAMMA
 echo "============================================"
 
 python -u run.py \
-  --is_training 1 \
+  --is_training $IS_TRAINING \
   --root_path ./dataset/haskins/ \
-  --data_path ema_6_pos.csv \
-  --model_id haskins_mae_pretrain_v2_${TRAIN_EPOCHS}epochs \
+  --data_path ema_7_pos_xz.csv \
+  --model_id haskins_mae_pretrain_v5_${TRAIN_EPOCHS}epochs \
   --model $model_name \
   --data haskins_mae \
   --features M \
@@ -72,8 +75,8 @@ python -u run.py \
   --enc_in $ENC_IN \
   --dec_in $ENC_IN \
   --c_out $ENC_IN \
-  --target 23 \
-  --des 'MAE_Pretrain_v2' \
+  --target 15 \
+  --des "MAE_Pretrain_v5${ABLATION_LABEL:+_${ABLATION_LABEL}}" \
   --d_model $D_MODEL \
   --d_ff $D_FF \
   --d_state $D_STATE \

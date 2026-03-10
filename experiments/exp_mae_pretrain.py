@@ -458,7 +458,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
         N = self.args.enc_in  # number of variates
 
         self.model.eval()
-        plots_saved = False
+        # Evenly space 4 plot indices across the full test set to sample different speakers
+        n_test = len(test_loader)
+        plot_batch_indices = set(
+            int(n_test * frac) for frac in [0.0, 0.25, 0.5, 0.75]
+        )
 
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
@@ -500,25 +504,24 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 all_targets.append(target.cpu().numpy())
                 all_masks.append(mask.cpu().numpy())
 
-                # --- Visualization plots ---
-                if not plots_saved and i == 0:
+                # --- Visualization plots (evenly spaced across test set) ---
+                if i in plot_batch_indices:
                     pred_np = pred.cpu().numpy()
                     target_np = target.cpu().numpy()
                     mask_np = mask.cpu().numpy()
 
+                    ex_rank = sorted(plot_batch_indices).index(i)
+                    ex_dir = os.path.join(folder_path, f"example_{ex_rank}_idx{i}")
+                    if not os.path.exists(ex_dir):
+                        os.makedirs(ex_dir)
+
                     # Save raw arrays
-                    np.save(os.path.join(folder_path, "sample_pred.npy"), pred_np)
-                    np.save(os.path.join(folder_path, "sample_target.npy"), target_np)
-                    np.save(os.path.join(folder_path, "sample_mask.npy"), mask_np)
+                    np.save(os.path.join(ex_dir, "sample_pred.npy"), pred_np)
+                    np.save(os.path.join(ex_dir, "sample_target.npy"), target_np)
+                    np.save(os.path.join(ex_dir, "sample_mask.npy"), mask_np)
 
                     # Select representative variates for plotting
-                    if N == 48:
-                        # Haskins EMA: sample across articulators
-                        plot_indices = list(range(N))
-                    elif N in (12, 24, 36):
-                        plot_indices = list(range(N))
-                    else:
-                        plot_indices = list(range(min(N, 12)))
+                    variate_indices = list(range(min(N, 48)))
 
                     sample_idx = 0  # first sample in batch
 
@@ -527,24 +530,24 @@ class Exp_MAE_Pretrain(Exp_Basic):
                         target_np[sample_idx],
                         pred_np[sample_idx],
                         mask_np[sample_idx],
-                        plot_indices,  # all variates
-                        os.path.join(folder_path, "reconstruction_overview.pdf"),
+                        variate_indices,
+                        os.path.join(ex_dir, "reconstruction_overview.pdf"),
                     )
 
                     # Plot 2: Individual variate reconstructions (like original S_Mamba)
-                    for plot_idx in plot_indices:
-                        gt = target_np[sample_idx, :, plot_idx]
-                        pd = pred_np[sample_idx, :, plot_idx]
+                    for vi in variate_indices:
+                        gt = target_np[sample_idx, :, vi]
+                        pd = pred_np[sample_idx, :, vi]
                         visual(
                             gt,
                             pd,
-                            os.path.join(folder_path, f"variate_{plot_idx}.pdf"),
+                            os.path.join(ex_dir, f"variate_{vi}.pdf"),
                         )
 
                     # Plot 3: Mask pattern visualization
                     self._plot_mask_pattern(
                         mask_np[sample_idx],
-                        os.path.join(folder_path, "mask_pattern.pdf"),
+                        os.path.join(ex_dir, "mask_pattern.pdf"),
                     )
 
                     # Plot 4: Per-variate MSE heatmap
@@ -552,12 +555,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
                     self._plot_error_heatmap(
                         per_var_mse,
                         mask_np[sample_idx],
-                        os.path.join(folder_path, "error_heatmap.pdf"),
+                        os.path.join(ex_dir, "error_heatmap.pdf"),
                     )
 
-                    plots_saved = True
                     print(
-                        f"  Saved {len(plot_indices)} variate plots + overview to {folder_path}"
+                        f"  Saved example {i}: {len(variate_indices)} variate plots + overview to {ex_dir}"
                     )
 
         avg_masked = np.mean(total_masked_loss)
@@ -595,21 +597,51 @@ class Exp_MAE_Pretrain(Exp_Basic):
         r2_full = np.mean(per_var_r2_full)
         r2_masked = np.mean(per_var_r2_masked)
 
+        # --- Oscillation-aware metrics ---
+        # 1) Derivative MSE: penalizes flat predictions that miss temporal dynamics
+        pred_diff = np.diff(all_preds, axis=1)   # [B, L-1, N]
+        tgt_diff = np.diff(all_targets, axis=1)   # [B, L-1, N]
+        delta_mse_full = np.mean((pred_diff - tgt_diff) ** 2)
+        per_var_delta_mse = np.mean((pred_diff - tgt_diff) ** 2, axis=(0, 1))  # [N]
+
+        # 2) Amplitude ratio: std(pred) / std(target) per variate
+        #    Near 1.0 = good, near 0 = flat/mean prediction
+        pred_std = np.std(all_preds, axis=(0, 1))   # [N]
+        tgt_std = np.std(all_targets, axis=(0, 1))   # [N]
+        per_var_amp_ratio = pred_std / (tgt_std + 1e-8)
+        amp_ratio_full = np.mean(per_var_amp_ratio)
+
+        # 3) Spectral coherence: frequency-domain correlation per variate
+        #    High coherence = prediction captures oscillation frequencies
+        from scipy.signal import coherence as scipy_coherence
+        per_var_coherence = np.zeros(N)
+        for v in range(N):
+            p_cat = all_preds[:, :, v].ravel()
+            t_cat = all_targets[:, :, v].ravel()
+            nperseg = min(256, len(p_cat) // 4) if len(p_cat) >= 16 else len(p_cat)
+            freqs, coh = scipy_coherence(t_cat, p_cat, nperseg=nperseg)
+            per_var_coherence[v] = np.mean(coh[1:]) if len(coh) > 1 else 0.0
+        coherence_full = np.mean(per_var_coherence)
+
         print(
             f"MAE Test Results:\n"
-            f"  Masked MSE:   {avg_masked:.6f}\n"
-            f"  Unmasked MSE: {avg_unmasked:.6f}\n"
-            f"  Full MSE:     {avg_full:.6f}\n"
-            f"  R2 (full):    {r2_full:.6f}\n"
-            f"  R2 (masked):  {r2_masked:.6f}\n"
+            f"  Masked MSE:        {avg_masked:.6f}\n"
+            f"  Unmasked MSE:      {avg_unmasked:.6f}\n"
+            f"  Full MSE:          {avg_full:.6f}\n"
+            f"  R2 (full):         {r2_full:.6f}\n"
+            f"  R2 (masked):       {r2_masked:.6f}\n"
+            f"  Derivative MSE:    {delta_mse_full:.6f}\n"
+            f"  Amplitude Ratio:   {amp_ratio_full:.4f}  (1.0 = ideal)\n"
+            f"  Spectral Coherence:{coherence_full:.4f}  (1.0 = ideal)\n"
             f"\n  Per-Variate Metrics:"
         )
-        print(f"  {'Var':>4s}  {'MSE(full)':>10s}  {'MSE(masked)':>11s}  {'R2(full)':>9s}  {'R2(masked)':>10s}")
-        print(f"  {'----':>4s}  {'----------':>10s}  {'-----------':>11s}  {'---------':>9s}  {'----------':>10s}")
+        print(f"  {'Var':>4s}  {'MSE(full)':>10s}  {'MSE(masked)':>11s}  {'R2(full)':>9s}  {'R2(masked)':>10s}  {'dMSE':>10s}  {'AmpRatio':>8s}  {'Coherence':>9s}")
+        print(f"  {'----':>4s}  {'----------':>10s}  {'-----------':>11s}  {'---------':>9s}  {'----------':>10s}  {'----------':>10s}  {'--------':>8s}  {'---------':>9s}")
         for v in range(N):
             print(
                 f"  {v:4d}  {per_var_mse_full[v]:10.6f}  {per_var_mse_masked[v]:11.6f}  "
-                f"{per_var_r2_full[v]:9.6f}  {per_var_r2_masked[v]:10.6f}"
+                f"{per_var_r2_full[v]:9.6f}  {per_var_r2_masked[v]:10.6f}  "
+                f"{per_var_delta_mse[v]:10.6f}  {per_var_amp_ratio[v]:8.4f}  {per_var_coherence[v]:9.4f}"
             )
 
         # Save results
@@ -619,7 +651,8 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
         np.save(
             os.path.join(folder_results, "mae_metrics.npy"),
-            np.array([avg_masked, avg_unmasked, avg_full, r2_full, r2_masked]),
+            np.array([avg_masked, avg_unmasked, avg_full, r2_full, r2_masked,
+                       delta_mse_full, amp_ratio_full, coherence_full]),
         )
         np.savez(
             os.path.join(folder_results, "mae_per_variate_metrics.npz"),
@@ -627,6 +660,9 @@ class Exp_MAE_Pretrain(Exp_Basic):
             mse_masked=per_var_mse_masked,
             r2_full=per_var_r2_full,
             r2_masked=per_var_r2_masked,
+            delta_mse=per_var_delta_mse,
+            amp_ratio=per_var_amp_ratio,
+            coherence=per_var_coherence,
         )
 
         f = open("result_mae_pretrain.txt", "a")
@@ -636,14 +672,20 @@ class Exp_MAE_Pretrain(Exp_Basic):
             f"unmasked_mse: {avg_unmasked:.6f} | "
             f"full_mse: {avg_full:.6f} | "
             f"r2_full: {r2_full:.6f} | "
-            f"r2_masked: {r2_masked:.6f}\n"
+            f"r2_masked: {r2_masked:.6f} | "
+            f"delta_mse: {delta_mse_full:.6f} | "
+            f"amp_ratio: {amp_ratio_full:.4f} | "
+            f"coherence: {coherence_full:.4f}\n"
         )
         for v in range(N):
             f.write(
                 f"  var{v:02d}: mse_full={per_var_mse_full[v]:.6f} "
                 f"mse_masked={per_var_mse_masked[v]:.6f} "
                 f"r2_full={per_var_r2_full[v]:.6f} "
-                f"r2_masked={per_var_r2_masked[v]:.6f}\n"
+                f"r2_masked={per_var_r2_masked[v]:.6f} "
+                f"delta_mse={per_var_delta_mse[v]:.6f} "
+                f"amp_ratio={per_var_amp_ratio[v]:.4f} "
+                f"coherence={per_var_coherence[v]:.4f}\n"
             )
         f.write("\n")
         f.close()
@@ -655,6 +697,9 @@ class Exp_MAE_Pretrain(Exp_Basic):
             "test/full_mse": avg_full,
             "test/r2_full": r2_full,
             "test/r2_masked": r2_masked,
+            "test/delta_mse": delta_mse_full,
+            "test/amp_ratio": amp_ratio_full,
+            "test/coherence": coherence_full,
         }
         self._wandb_log(wandb_dict)
 
@@ -692,6 +737,15 @@ class Exp_MAE_Pretrain(Exp_Basic):
             )
             wandb_dict["test/per_variate_mse_masked"] = _make_vbar(
                 per_var_mse_masked, "Per-Variate MSE (Masked)", "MSE", color="coral"
+            )
+            wandb_dict["test/per_variate_delta_mse"] = _make_vbar(
+                per_var_delta_mse, "Per-Variate Derivative MSE", "dMSE", color="orchid"
+            )
+            wandb_dict["test/per_variate_amp_ratio"] = _make_vbar(
+                per_var_amp_ratio, "Per-Variate Amplitude Ratio (1.0=ideal)", "Ratio", color="seagreen"
+            )
+            wandb_dict["test/per_variate_coherence"] = _make_vbar(
+                per_var_coherence, "Per-Variate Spectral Coherence", "Coherence", color="goldenrod"
             )
 
             self._wandb_log(wandb_dict)
@@ -773,40 +827,59 @@ class Exp_MAE_Pretrain(Exp_Basic):
                         f"  {v:4d}  {per_var_np_mse[v]:10.6f}  {per_var_np_r2[v]:10.6f}"
                     )
 
-                # Per-variate plots: context + GT future + predicted future
-                sample_pred = np_preds_all[0]  # [pl, N]
-                sample_target_full = np.concatenate(
-                    [np_targets_all[0:1]], axis=0
-                )[0]  # [pl, N] — target future
-                # Get context from first test batch
-                first_batch_x = None
-                for batch_x, _, _, _ in test_loader:
-                    first_batch_x = batch_x[0].numpy()  # [L, N]
-                    break
-                self._plot_next_patch(
-                    context=first_batch_x[:boundary + 1],  # [boundary+1, N]
-                    target_future=first_batch_x[boundary + 1:boundary + 1 + pl],
-                    pred_future=sample_pred,  # [pl, N]
-                    pred_len=pl,
-                    variate_indices=list(range(N)),
-                    save_path=os.path.join(
-                        np_folder, f"next_patch_pl{pl}_overview.pdf"
-                    ),
-                )
+                # Per-variate plots: 4 evenly spaced examples
+                n_total = np_preds_all.shape[0]
+                np_example_indices = [
+                    int(n_total * frac)
+                    for frac in [0.0, 0.25, 0.5, 0.75]
+                ]
+                # Clamp to valid range
+                np_example_indices = [
+                    min(idx, n_total - 1) for idx in np_example_indices
+                ]
 
-                # Individual variate plots
-                for v in range(N):
-                    self._plot_next_patch_variate(
-                        context=first_batch_x[:boundary + 1, v],
-                        target_future=first_batch_x[
-                            boundary + 1 : boundary + 1 + pl, v
-                        ],
-                        pred_future=sample_pred[:, v],
-                        variate_idx=v,
+                # Collect full input sequences for context
+                all_context_x = []
+                with torch.no_grad():
+                    for bi, (batch_x, _, _, _) in enumerate(test_loader):
+                        all_context_x.append(batch_x.numpy())
+                        if len(np.concatenate(all_context_x, axis=0)) >= n_total:
+                            break
+                all_context_x = np.concatenate(all_context_x, axis=0)[:n_total]
+
+                for ex_rank, ex_idx in enumerate(np_example_indices):
+                    sample_pred = np_preds_all[ex_idx]  # [pl, N]
+                    context_x = all_context_x[ex_idx]  # [L, N]
+
+                    ex_suffix = f"_ex{ex_rank}"
+                    self._plot_next_patch(
+                        context=context_x[:boundary + 1],
+                        target_future=context_x[boundary + 1:boundary + 1 + pl],
+                        pred_future=sample_pred,
                         pred_len=pl,
+                        variate_indices=list(range(N)),
                         save_path=os.path.join(
-                            np_folder, f"next_patch_pl{pl}_var{v}.pdf"
+                            np_folder, f"next_patch_pl{pl}{ex_suffix}_overview.pdf"
                         ),
+                    )
+
+                    # Individual variate plots
+                    for v in range(N):
+                        self._plot_next_patch_variate(
+                            context=context_x[:boundary + 1, v],
+                            target_future=context_x[
+                                boundary + 1 : boundary + 1 + pl, v
+                            ],
+                            pred_future=sample_pred[:, v],
+                            variate_idx=v,
+                            pred_len=pl,
+                            save_path=os.path.join(
+                                np_folder, f"next_patch_pl{pl}{ex_suffix}_var{v}.pdf"
+                            ),
+                        )
+
+                    print(
+                        f"  Saved next-patch example {ex_rank} (idx={ex_idx}) for pl={pl}"
                     )
 
                 # Save arrays
