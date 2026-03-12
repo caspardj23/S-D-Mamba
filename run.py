@@ -380,6 +380,33 @@ if __name__ == "__main__":
         help="weight for spectral (FFT magnitude) loss in pre-training and fine-tuning",
     )
 
+    # NextPatch fine-tuning arguments
+    parser.add_argument(
+        "--finetune_mode",
+        type=str,
+        default="mask",
+        choices=["mask", "nextpatch"],
+        help="fine-tuning approach: 'mask' (mask-token, original) or 'nextpatch' (context-only + NPD)",
+    )
+    parser.add_argument(
+        "--ar_patch_size",
+        type=int,
+        default=24,
+        help="patch size for autoregressive roll-out in nextpatch fine-tuning (default: 24)",
+    )
+    parser.add_argument(
+        "--ar_threshold",
+        type=int,
+        default=48,
+        help="pred_len above which autoregressive mode is used (default: 48)",
+    )
+    parser.add_argument(
+        "--delta_velocity",
+        type=float,
+        default=0.0,
+        help="weight for velocity (temporal difference) loss in fine-tuning (default: 0.0)",
+    )
+
     args = parser.parse_args()
 
     # Set lr_encoder default if not specified

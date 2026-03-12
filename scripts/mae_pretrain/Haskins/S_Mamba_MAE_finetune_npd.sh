@@ -1,31 +1,22 @@
 #!/bin/bash
 # ==============================================================================
-# S-Mamba MAE Fine-Tuning on Haskins EMA Data (v4)
+# S-Mamba MAE Fine-Tuning with NextPatchDecoder on Haskins EMA Data
 #
-# Fine-tunes a pre-trained S-Mamba MAE encoder for forecasting.
-# Supports three strategies: full, freeze, partial.
-#
-# v4 changes:
-#   - 16 variates (posX + posZ) via ema_8_pos_xz.csv
-#   - 8 speakers (F01-F04, M01-M04)
-#   - Sentence-aware splitting and windowing
-#   - seq_len=160, stride=80
+# Uses context-only encoding + pre-trained NextPatchDecoder instead of the
+# mask-token approach. This avoids the OOD suffix-mask problem that degraded
+# performance in the original fine-tuning pipeline.
 #
 # Usage:
 #   # Full fine-tune (default)
-#   ENCODER_CKPT=<path> bash S_Mamba_MAE_finetune.sh
+#   ENCODER_CKPT=<path> bash S_Mamba_MAE_finetune_npd.sh
 #
-#   # Frozen encoder
-#   ENCODER_CKPT=<path> STRATEGY=freeze bash S_Mamba_MAE_finetune.sh
+#   # Frozen encoder + NPD
+#   ENCODER_CKPT=<path> STRATEGY=freeze bash S_Mamba_MAE_finetune_npd.sh
 #
-#   # Partial (unfreeze last 2 layers)
-#   ENCODER_CKPT=<path> STRATEGY=partial UNFREEZE=2 bash S_Mamba_MAE_finetune.sh
+#   # With velocity loss
+#   ENCODER_CKPT=<path> DELTA_VELOCITY=0.1 bash S_Mamba_MAE_finetune_npd.sh
 #
-#   # Scratch baseline (no pre-training)
-#   STRATEGY=full bash S_Mamba_MAE_finetune.sh
-#
-# All parameters can be overridden via environment variables, e.g.:
-#   TRAIN_EPOCHS=50 PRED_LEN=48 ENCODER_CKPT=<path> bash S_Mamba_MAE_finetune.sh
+# All parameters can be overridden via environment variables.
 # ==============================================================================
 
 export CUDA_VISIBLE_DEVICES=0
@@ -33,12 +24,12 @@ export CUDA_VISIBLE_DEVICES=0
 # --- Configurable via environment variables ---
 PRED_LEN=${PRED_LEN:-48}
 SEQ_LEN=${SEQ_LEN:-160}
-D_MODEL=${D_MODEL:-128}
+D_MODEL=${D_MODEL:-192}
 E_LAYERS=${E_LAYERS:-3}
-D_FF=${D_FF:-256}
+D_FF=${D_FF:-384}
 D_STATE=${D_STATE:-32}
 D_CONV_TEMPORAL=${D_CONV_TEMPORAL:-4}
-EXPAND_TEMPORAL=${EXPAND_TEMPORAL:-2}
+EXPAND_TEMPORAL=${EXPAND_TEMPORAL:-4}
 DROPOUT=${DROPOUT:-0.2}
 LR=${LR:-0.0001}
 LR_ENCODER=${LR_ENCODER:-0.00001}
@@ -51,6 +42,9 @@ BATCH_SIZE=${BATCH_SIZE:-64}
 MAE_STRIDE=${MAE_STRIDE:-80}
 ENC_IN=${ENC_IN:-16}
 GAMMA_SPECTRAL=${GAMMA_SPECTRAL:-0.0}
+DELTA_VELOCITY=${DELTA_VELOCITY:-0.1}
+AR_PATCH_SIZE=${AR_PATCH_SIZE:-24}
+AR_THRESHOLD=${AR_THRESHOLD:-48}
 
 # Path to pre-trained encoder checkpoint
 ENCODER_CKPT=${ENCODER_CKPT:-""}
@@ -58,7 +52,7 @@ ENCODER_CKPT=${ENCODER_CKPT:-""}
 model_name=S_Mamba_MAE_Finetune
 
 echo "============================================"
-echo "S-Mamba MAE Fine-Tuning on Haskins EMA (v4)"
+echo "S-Mamba NextPatch Fine-Tuning on Haskins EMA"
 echo "  variates=${ENC_IN} (posX + posZ)"
 echo "  pred_len=${PRED_LEN}, strategy=${STRATEGY}"
 echo "  d_model=${D_MODEL}, e_layers=${E_LAYERS}"
@@ -66,6 +60,8 @@ echo "  d_ff=${D_FF}, d_state=${D_STATE}"
 echo "  lr=${LR}, lr_encoder=${LR_ENCODER}"
 echo "  dropout=${DROPOUT}, weight_decay=${WEIGHT_DECAY}"
 echo "  mae_stride=${MAE_STRIDE}"
+echo "  delta_velocity=${DELTA_VELOCITY}"
+echo "  ar_patch_size=${AR_PATCH_SIZE}, ar_threshold=${AR_THRESHOLD}"
 if [ -n "${ENCODER_CKPT}" ]; then
 echo "  encoder_ckpt=${ENCODER_CKPT}"
 else
@@ -94,11 +90,11 @@ fi
 
 # Construct model_id
 if [ -n "${PRETRAIN_ARGS}" ]; then
-    MODEL_ID="haskins_mae_ft_v4_${STRATEGY}_pl${PRED_LEN}"
-    DES="MAE_FT_v4_${STRATEGY}"
+    MODEL_ID="haskins_mae_ft_npd_${STRATEGY}_pl${PRED_LEN}"
+    DES="MAE_FT_NPD_${STRATEGY}"
 else
-    MODEL_ID="haskins_mae_ft_v4_scratch_pl${PRED_LEN}"
-    DES="MAE_FT_v4_scratch"
+    MODEL_ID="haskins_mae_ft_npd_scratch_pl${PRED_LEN}"
+    DES="MAE_FT_NPD_scratch"
 fi
 
 python -u run.py \
@@ -131,6 +127,7 @@ python -u run.py \
   --use_norm 0 \
   --loss MSE \
   --exp_name mae_finetune \
+  --finetune_mode nextpatch \
   --finetune_strategy $STRATEGY \
   --unfreeze_layers $UNFREEZE \
   --max_grad_norm 1.0 \
@@ -139,10 +136,13 @@ python -u run.py \
   --dropout $DROPOUT \
   --mae_stride $MAE_STRIDE \
   --gamma_spectral $GAMMA_SPECTRAL \
+  --delta_velocity $DELTA_VELOCITY \
+  --ar_patch_size $AR_PATCH_SIZE \
+  --ar_threshold $AR_THRESHOLD \
   --itr 1 \
   --per_variate_scoring \
   $PRETRAIN_ARGS
 
 echo "============================================"
-echo "Fine-tuning complete."
+echo "NextPatch fine-tuning complete."
 echo "============================================"

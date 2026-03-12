@@ -13,9 +13,11 @@ Supports differential learning rates: lower LR for encoder, higher for head.
 from data_provider.data_factory import data_provider
 from experiments.exp_basic import Exp_Basic
 from model.S_Mamba_MAE import FinetuneModel as MambaFinetuneModel
+from model.S_Mamba_MAE import FinetuneNextPatchModel as MambaFinetuneNextPatchModel
 from model.Transformer_MAE import FinetuneModel as TransformerFinetuneModel
 from utils.tools import EarlyStopping, adjust_learning_rate, visual
 from utils.losses import spectral_loss as _spectral_loss
+from utils.losses import velocity_loss as _velocity_loss
 from utils.metrics import metric
 import torch
 import torch.nn as nn
@@ -43,10 +45,13 @@ class Exp_MAE_Finetune(Exp_Basic):
             print("Training from scratch (no pre-training).")
 
     def _build_model(self):
-        # Select FinetuneModel based on the model name
+        # Select FinetuneModel based on the model name and finetune_mode
         model_name = getattr(self.args, "model", "S_Mamba_MAE_Finetune")
+        finetune_mode = getattr(self.args, "finetune_mode", "mask")
         if "Transformer" in model_name:
             model = TransformerFinetuneModel(self.args).float()
+        elif finetune_mode == "nextpatch":
+            model = MambaFinetuneNextPatchModel(self.args).float()
         else:
             model = MambaFinetuneModel(self.args).float()
         if self.args.use_multi_gpu and self.args.use_gpu:
@@ -70,8 +75,9 @@ class Exp_MAE_Finetune(Exp_Basic):
             )
             wd = getattr(self.args, "weight_decay", 1e-4)
             optimizer = optim.AdamW(param_groups, weight_decay=wd)
+            lr_strs = ", ".join(f"{g['lr']:.2e}" for g in param_groups)
             print(
-                f"Using differential LR: encoder={lr_encoder:.2e}, head={lr_head:.2e}, weight_decay={wd:.1e}"
+                f"Using differential LR: [{lr_strs}], weight_decay={wd:.1e}"
             )
         else:
             wd = getattr(self.args, "weight_decay", 1e-4)
@@ -158,8 +164,11 @@ class Exp_MAE_Finetune(Exp_Basic):
 
         max_grad_norm = getattr(self.args, "max_grad_norm", 1.0)
         gamma_spectral = getattr(self.args, "gamma_spectral", 0.0)
+        delta_velocity = getattr(self.args, "delta_velocity", 0.0)
         if gamma_spectral > 0:
             print(f"Spectral loss enabled: gamma_spectral={gamma_spectral}")
+        if delta_velocity > 0:
+            print(f"Velocity loss enabled: delta_velocity={delta_velocity}")
 
         # Optional cosine scheduler
         use_cosine = getattr(self.args, "use_cosine_scheduler", False)
@@ -223,6 +232,8 @@ class Exp_MAE_Finetune(Exp_Basic):
                         loss = criterion(outputs, target)
                         if gamma_spectral > 0:
                             loss = loss + gamma_spectral * _spectral_loss(outputs, target)
+                        if delta_velocity > 0:
+                            loss = loss + delta_velocity * _velocity_loss(outputs, target)
 
                     scaler.scale(loss).backward()
                     scaler.unscale_(model_optim)
@@ -240,6 +251,8 @@ class Exp_MAE_Finetune(Exp_Basic):
                     loss = criterion(outputs, target)
                     if gamma_spectral > 0:
                         loss = loss + gamma_spectral * _spectral_loss(outputs, target)
+                    if delta_velocity > 0:
+                        loss = loss + delta_velocity * _velocity_loss(outputs, target)
 
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(

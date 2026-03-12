@@ -781,9 +781,10 @@ class Exp_MAE_Pretrain(Exp_Basic):
                         if i >= 2000:
                             break
                         batch_x = batch_x.float().to(self.device)
-                        # Encode without masking for clean representations
-                        encoder_out = model_raw.encode(batch_x)
-                        # Predict future frames
+                        # Causal encode: only context frames up to boundary
+                        # (no future information leaking through backward scan)
+                        encoder_out = model_raw.encode_causal(batch_x, boundary)
+                        # Predict future frames from causal representations
                         pred_next = model_raw.next_patch_decoder(
                             encoder_out, boundary, pl
                         )  # [B, pl, N]

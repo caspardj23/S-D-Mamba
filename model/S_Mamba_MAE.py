@@ -399,6 +399,12 @@ class Model(nn.Module):
         loss_mask = F.mse_loss(pred_masked, target_masked)
 
         # --- Next-patch prediction (causal auxiliary objective) ---
+        # IMPORTANT: We do a separate causal-only encode for the NPD loss.
+        # The bidirectional encoder's backward scan would otherwise leak future
+        # information into the boundary representations, making the NPD learn to
+        # decode leaked info rather than predict forward dynamics. By encoding
+        # only context frames [0..boundary], the backward scan has no future
+        # frames to read, forcing genuinely causal representations.
         loss_next = torch.tensor(0.0, device=x_enc.device)
         if self.next_patch_decoder is not None and self.training:
             # Sample a random prediction length and causal boundary
@@ -410,8 +416,10 @@ class Model(nn.Module):
                 boundary = np.random.randint(min_boundary, max_boundary + 1)
                 # Target: the ground truth frames after the boundary
                 target_next = target[:, boundary + 1:boundary + 1 + pred_len, :]  # [B, pred_len, N]
-                # Predict from encoder output at the boundary
-                pred_next = self.next_patch_decoder(encoder_out, boundary, pred_len)  # [B, pred_len, N]
+                # Causal encode: only context frames, no future information
+                causal_encoder_out = self.encode_causal(x_enc, boundary)
+                # Predict from causal encoder output at the boundary
+                pred_next = self.next_patch_decoder(causal_encoder_out, boundary, pred_len)  # [B, pred_len, N]
                 loss_next = F.mse_loss(pred_next, target_next)
 
         # --- Spectral loss (frequency-domain regularisation) ---
@@ -449,6 +457,27 @@ class Model(nn.Module):
         x = self.encoder(x)
         return x
 
+    def encode_causal(self, x_enc, boundary_idx):
+        """
+        Encode only the context portion [0..boundary_idx] without masking.
+
+        This gives the NextPatchDecoder a genuinely causal encoder state —
+        the bidirectional encoder only sees frames up to and including the
+        boundary, with no future information leaking through the backward scan.
+
+        Args:
+            x_enc: [B, L, N] — full input sequence
+            boundary_idx: int — last context position (inclusive)
+
+        Returns:
+            [B, boundary_idx+1, d_model] encoder hidden states (context only)
+        """
+        context = x_enc[:, :boundary_idx + 1, :]  # [B, ctx_len, N]
+        x = self.input_proj(context)
+        x = self.pos_enc(x)
+        x = self.encoder(x)
+        return x
+
     def get_encoder_state_dict(self):
         """Extract encoder weights for transfer to a forecasting model."""
         state = {}
@@ -456,6 +485,8 @@ class Model(nn.Module):
         state["pos_enc"] = {k: v for k, v in self.pos_enc.state_dict().items()}
         state["encoder"] = self.encoder.state_dict()
         state["mask_token"] = self.mask_token.data
+        if self.next_patch_decoder is not None:
+            state["next_patch_decoder"] = self.next_patch_decoder.state_dict()
         return state
 
 
@@ -718,4 +749,329 @@ class FinetuneModel(nn.Module):
         return [
             {"params": encoder_params, "lr": lr_encoder},
             {"params": head_params, "lr": lr_head},
+        ]
+
+
+class FinetuneNextPatchModel(nn.Module):
+    """
+    S-Mamba fine-tune model using the pre-trained NextPatchDecoder.
+
+    Instead of the mask-token approach (which feeds [context | MASK...MASK] through
+    the encoder), this model encodes ONLY the context frames and uses the
+    NextPatchDecoder to predict future frames directly from clean encoder
+    representations.
+
+    This avoids the OOD suffix-mask problem: the pre-trained BiMamba encoder was
+    trained with scattered 40% block masks, not contiguous suffix masks. Encoding
+    only real data keeps encoder representations in-distribution.
+
+    For longer horizons (pred_len > ar_threshold), uses autoregressive patch-by-patch
+    prediction: predict a patch of frames, project back to d_model, append to
+    encoder output, and repeat.
+
+    Architecture:
+        Input [B, seq_len, N]
+          -> Split: context [B, ctx_len, N] | target [B, pred_len, N]
+          -> input_proj(context) -> pos_enc -> BiMamba encoder -> [B, ctx_len, d_model]
+          -> NextPatchDecoder(boundary=ctx_len-1, pred_len) -> [B, pred_len, enc_in]
+          -> temporal refinement (1D conv, residual-gated) -> output
+    """
+
+    def __init__(self, configs):
+        super().__init__()
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        self.enc_in = configs.enc_in
+        self.d_model = getattr(configs, "d_model", 256)
+        self.use_norm = getattr(configs, "use_norm", 0)
+
+        # Fine-tune strategy
+        self.finetune_strategy = getattr(configs, "finetune_strategy", "full")
+        self.unfreeze_layers = getattr(configs, "unfreeze_layers", 2)
+
+        # Autoregressive config
+        self.ar_patch_size = getattr(configs, "ar_patch_size", 24)
+        self.ar_threshold = getattr(configs, "ar_threshold", 48)
+
+        # Encoder config (must match pre-training)
+        n_layers = getattr(configs, "e_layers", 4)
+        d_state = getattr(configs, "d_state", 32)
+        d_conv = getattr(configs, "d_conv_temporal", 4)
+        expand = getattr(configs, "expand_temporal", 2)
+        dropout = getattr(configs, "dropout", 0.1)
+
+        # --- Input projection (from pre-training) ---
+        self.input_proj = nn.Linear(self.enc_in, self.d_model)
+
+        # --- Positional encoding (from pre-training) ---
+        self.pos_enc = PositionalEncoding(
+            self.d_model, max_len=max(5000, self.seq_len + 100), dropout=dropout
+        )
+
+        # --- Encoder (from pre-training) ---
+        self.encoder = BiMambaEncoder(
+            d_model=self.d_model,
+            n_layers=n_layers,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            dropout=dropout,
+        )
+
+        # --- NextPatchDecoder (from pre-training) ---
+        self.next_patch_decoder = NextPatchDecoder(
+            d_model=self.d_model,
+            enc_in=self.enc_in,
+            max_pred_len=96,
+            context_window=16,
+            dropout=dropout,
+        )
+
+        # --- Temporal refinement (trained from scratch) ---
+        # 1D conv over time axis to enforce smooth trajectories
+        self.temporal_refine = nn.Sequential(
+            nn.Conv1d(self.enc_in, self.enc_in * 2, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Conv1d(self.enc_in * 2, self.enc_in, kernel_size=5, padding=2),
+        )
+        # Learnable gate controlling how much refinement to apply (starts at 0)
+        self.refine_gate = nn.Parameter(torch.tensor(0.0))
+
+        # --- Projection for autoregressive roll-out ---
+        # Maps predicted frames back to d_model for appending to encoder context
+        self.pred_to_context_proj = nn.Linear(self.enc_in, self.d_model)
+
+        self._print_param_count()
+
+    def _print_param_count(self):
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(
+            f"[FinetuneNextPatch] Total: {total:,} | Trainable: {trainable:,} | "
+            f"strategy={self.finetune_strategy}"
+        )
+
+    def load_pretrained_encoder(self, checkpoint_path):
+        """
+        Load pre-trained weights: encoder + NextPatchDecoder.
+
+        Supports both encoder-only checkpoints (encoder_checkpoint.pth) and
+        full model checkpoints (checkpoint.pth). The NextPatchDecoder weights
+        are loaded from whichever source contains them.
+        """
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+
+        # Determine checkpoint format
+        if "encoder_state" in ckpt:
+            encoder_state = ckpt["encoder_state"]
+        elif "model_state_dict" in ckpt:
+            full_state = ckpt["model_state_dict"]
+            encoder_state = {
+                "input_proj": {
+                    k.replace("input_proj.", ""): v
+                    for k, v in full_state.items()
+                    if k.startswith("input_proj.")
+                },
+                "pos_enc": {
+                    k.replace("pos_enc.", ""): v
+                    for k, v in full_state.items()
+                    if k.startswith("pos_enc.")
+                },
+                "encoder": {
+                    k.replace("encoder.", ""): v
+                    for k, v in full_state.items()
+                    if k.startswith("encoder.") and not k.startswith("encoder_")
+                },
+                "next_patch_decoder": {
+                    k.replace("next_patch_decoder.", ""): v
+                    for k, v in full_state.items()
+                    if k.startswith("next_patch_decoder.")
+                },
+            }
+            if "mask_token" in full_state:
+                encoder_state["mask_token"] = full_state["mask_token"]
+        else:
+            encoder_state = ckpt
+
+        # Load encoder weights
+        self.input_proj.load_state_dict(encoder_state["input_proj"])
+        self.pos_enc.load_state_dict(encoder_state["pos_enc"], strict=False)
+        self.encoder.load_state_dict(encoder_state["encoder"])
+
+        # Load NextPatchDecoder weights
+        npd_loaded = False
+        if "next_patch_decoder" in encoder_state and encoder_state["next_patch_decoder"]:
+            self.next_patch_decoder.load_state_dict(encoder_state["next_patch_decoder"])
+            npd_loaded = True
+            print("[FinetuneNextPatch] Loaded pre-trained NextPatchDecoder")
+
+        if not npd_loaded:
+            # Try loading from the full model checkpoint in the same directory
+            import os
+            ckpt_dir = os.path.dirname(checkpoint_path)
+            full_ckpt_path = os.path.join(ckpt_dir, "checkpoint.pth")
+            if os.path.exists(full_ckpt_path):
+                full_ckpt = torch.load(full_ckpt_path, map_location="cpu")
+                if "model_state_dict" in full_ckpt:
+                    npd_state = {
+                        k.replace("next_patch_decoder.", ""): v
+                        for k, v in full_ckpt["model_state_dict"].items()
+                        if k.startswith("next_patch_decoder.")
+                    }
+                    if npd_state:
+                        self.next_patch_decoder.load_state_dict(npd_state)
+                        npd_loaded = True
+                        print(f"[FinetuneNextPatch] Loaded NPD from full checkpoint: {full_ckpt_path}")
+
+        if not npd_loaded:
+            print("[FinetuneNextPatch] WARNING: NextPatchDecoder weights not found, using random init")
+
+        print(f"[FinetuneNextPatch] Loaded pre-trained encoder from {checkpoint_path}")
+
+        # Apply fine-tuning strategy
+        self._apply_finetune_strategy()
+
+    def _apply_finetune_strategy(self):
+        """Freeze/unfreeze parameters based on fine-tuning strategy."""
+        if self.finetune_strategy == "freeze":
+            for param in self.input_proj.parameters():
+                param.requires_grad = False
+            for param in self.pos_enc.parameters():
+                param.requires_grad = False
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            for param in self.next_patch_decoder.parameters():
+                param.requires_grad = False
+            print("[FinetuneNextPatch] Froze encoder + NPD (freeze strategy)")
+
+        elif self.finetune_strategy == "partial":
+            for param in self.input_proj.parameters():
+                param.requires_grad = False
+            for param in self.pos_enc.parameters():
+                param.requires_grad = False
+            n_total = len(self.encoder.layers)
+            for i, layer in enumerate(self.encoder.layers):
+                if i < n_total - self.unfreeze_layers:
+                    for param in layer.parameters():
+                        param.requires_grad = False
+            # NPD stays trainable in partial mode
+            print(
+                f"[FinetuneNextPatch] Partial freeze: "
+                f"unfroze last {self.unfreeze_layers}/{n_total} encoder layers + NPD"
+            )
+
+        elif self.finetune_strategy == "full":
+            print("[FinetuneNextPatch] Full fine-tune (all params trainable)")
+
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        print(f"[FinetuneNextPatch] Trainable: {trainable:,} / {total:,}")
+
+    def _encode_context(self, context):
+        """Encode context-only frames (no MASK tokens)."""
+        x = self.input_proj(context)  # [B, ctx_len, d_model]
+        x = self.pos_enc(x)
+        encoder_out = self.encoder(x)  # [B, ctx_len, d_model]
+        return encoder_out
+
+    def _predict_single_shot(self, encoder_out, pred_len):
+        """Single-shot prediction from encoder context."""
+        boundary_idx = encoder_out.shape[1] - 1
+        raw_pred = self.next_patch_decoder(encoder_out, boundary_idx, pred_len)
+        return self._apply_refinement(raw_pred)
+
+    def _predict_autoregressive(self, encoder_out, pred_len):
+        """Autoregressive patch-by-patch prediction for longer horizons."""
+        all_preds = []
+        remaining = pred_len
+
+        while remaining > 0:
+            step_len = min(self.ar_patch_size, remaining)
+            boundary_idx = encoder_out.shape[1] - 1
+
+            raw_pred = self.next_patch_decoder(encoder_out, boundary_idx, step_len)
+            all_preds.append(raw_pred)
+
+            remaining -= step_len
+            if remaining > 0:
+                # Project predicted frames back to d_model and append to context
+                pseudo_ctx = self.pred_to_context_proj(raw_pred)  # [B, step_len, d_model]
+                encoder_out = torch.cat([encoder_out, pseudo_ctx], dim=1)
+
+        pred = torch.cat(all_preds, dim=1)  # [B, pred_len, enc_in]
+        return self._apply_refinement(pred)
+
+    def _apply_refinement(self, pred):
+        """Apply temporal refinement with gated residual."""
+        # pred: [B, pred_len, enc_in]
+        refined = self.temporal_refine(pred.transpose(1, 2)).transpose(1, 2)
+        gate = torch.sigmoid(self.refine_gate)
+        return pred + gate * (refined - pred)
+
+    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+        """
+        Forecasting forward pass using context-only encoding + NextPatchDecoder.
+
+        Input x_enc: [B, seq_len, N] where:
+          - x_enc[:, :ctx_len, :] = observed context (ctx_len = seq_len - pred_len)
+          - x_enc[:, -pred_len:, :] = ground truth target (not seen by the model)
+        """
+        B, L, N = x_enc.shape
+        ctx_len = L - self.pred_len
+
+        if self.use_norm:
+            context_for_norm = x_enc[:, :ctx_len, :]
+            means = context_for_norm.mean(1, keepdim=True).detach()
+            stdev = torch.sqrt(
+                torch.var(context_for_norm, dim=1, keepdim=True, unbiased=False) + 1e-5
+            )
+            x_enc = (x_enc - means) / stdev
+
+        context = x_enc[:, :ctx_len, :]  # [B, ctx_len, N]
+
+        # Encode context only (no MASK tokens -- all real data)
+        encoder_out = self._encode_context(context)
+
+        # Predict: single-shot for short horizons, autoregressive for long
+        if self.pred_len > self.ar_threshold:
+            dec_out = self._predict_autoregressive(encoder_out, self.pred_len)
+        else:
+            dec_out = self._predict_single_shot(encoder_out, self.pred_len)
+
+        if self.use_norm:
+            dec_out = dec_out * stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1)
+            dec_out = dec_out + means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1)
+
+        return dec_out
+
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+        dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+        return dec_out[:, -self.pred_len :, :]
+
+    def get_param_groups(self, lr_encoder=1e-5, lr_head=1e-4):
+        """
+        Get parameter groups with differential learning rates.
+
+        Three groups:
+          - Encoder (input_proj + pos_enc + encoder): lowest LR
+          - NextPatchDecoder: medium LR (pre-trained, gentle tuning)
+          - New components (temporal_refine, refine_gate, pred_to_context_proj): highest LR
+        """
+        encoder_params = (
+            list(self.input_proj.parameters())
+            + list(self.pos_enc.parameters())
+            + list(self.encoder.parameters())
+        )
+        npd_params = list(self.next_patch_decoder.parameters())
+        new_params = (
+            list(self.temporal_refine.parameters())
+            + [self.refine_gate]
+            + list(self.pred_to_context_proj.parameters())
+        )
+
+        lr_npd = (lr_encoder + lr_head) / 2  # midpoint between encoder and head LR
+        return [
+            {"params": encoder_params, "lr": lr_encoder},
+            {"params": npd_params, "lr": lr_npd},
+            {"params": new_params, "lr": lr_head},
         ]

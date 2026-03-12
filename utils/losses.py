@@ -25,3 +25,22 @@ def spectral_loss(pred, target, dim=1):
     pred_fft = torch.fft.rfft(pred, dim=dim)
     target_fft = torch.fft.rfft(target, dim=dim)
     return F.l1_loss(pred_fft.abs(), target_fft.abs())
+
+
+def velocity_loss(pred, target):
+    """
+    First-order temporal difference loss for smooth trajectories.
+
+    Penalizes mismatch in frame-to-frame velocity between pred and target,
+    encouraging physically plausible articulator dynamics.
+
+    Args:
+        pred:   [B, L, N] predicted sequence
+        target: [B, L, N] ground-truth sequence
+
+    Returns:
+        Scalar loss (mean L1 on first-order differences).
+    """
+    pred_vel = pred[:, 1:, :] - pred[:, :-1, :]
+    target_vel = target[:, 1:, :] - target[:, :-1, :]
+    return F.l1_loss(pred_vel, target_vel)
