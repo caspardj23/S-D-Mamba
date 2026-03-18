@@ -48,7 +48,8 @@ IS_TRAINING=${IS_TRAINING:-1}
 model_name=S_Mamba_MAE
 
 echo "============================================"
-echo "S-Mamba MAE Pre-Training on Haskins EMA (v4)"
+echo "S-Mamba MAE Pre-Training on Haskins EMA (v1.0) with data fix with seperate sentences per speaker."
+echo "With phoneme labels shown in test plots."
 echo "  variates=${ENC_IN} (posX + posZ)"
 echo "  epochs=${TRAIN_EPOCHS}"
 echo "  d_model=${D_MODEL}, e_layers=${E_LAYERS}"
@@ -64,8 +65,8 @@ echo "============================================"
 python -u run.py \
   --is_training $IS_TRAINING \
   --root_path ./dataset/haskins/ \
-  --data_path ema_7_pos_xz.csv \
-  --model_id haskins_mae_pretrain_v5_${TRAIN_EPOCHS}epochs \
+  --data_path ema_7_pos_xz_phone.csv \
+  --model_id haskins_mae_pretrain_v1.0_${TRAIN_EPOCHS}epochs \
   --model $model_name \
   --data haskins_mae \
   --features M \
@@ -76,7 +77,7 @@ python -u run.py \
   --dec_in $ENC_IN \
   --c_out $ENC_IN \
   --target 15 \
-  --des "MAE_Pretrain_v5${ABLATION_LABEL:+_${ABLATION_LABEL}}" \
+  --des "MAE_Pretrain_${ABLATION_LABEL:+_${ABLATION_LABEL}}" \
   --d_model $D_MODEL \
   --d_ff $D_FF \
   --d_state $D_STATE \

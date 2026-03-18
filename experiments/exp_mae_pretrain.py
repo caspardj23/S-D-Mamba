@@ -525,6 +525,16 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
                     sample_idx = 0  # first sample in batch
 
+                    # Get phone labels for this window if available
+                    phone_labels = None
+                    if hasattr(test_data, "get_phone_labels"):
+                        phone_labels = test_data.get_phone_labels(i)
+
+                    # Get sentence text for this window if available
+                    sentence_info = None
+                    if hasattr(test_data, "get_sentence_info"):
+                        sentence_info = test_data.get_sentence_info(i)
+
                     # Plot 1: Per-variate reconstruction (GT vs Pred with mask shading)
                     self._plot_reconstruction(
                         target_np[sample_idx],
@@ -532,6 +542,8 @@ class Exp_MAE_Pretrain(Exp_Basic):
                         mask_np[sample_idx],
                         variate_indices,
                         os.path.join(ex_dir, "reconstruction_overview.pdf"),
+                        phone_labels=phone_labels,
+                        sentence_info=sentence_info,
                     )
 
                     # Plot 2: Individual variate reconstructions (like original S_Mamba)
@@ -1044,7 +1056,8 @@ class Exp_MAE_Pretrain(Exp_Basic):
         plt.savefig(save_path, bbox_inches="tight", dpi=150)
         plt.close()
 
-    def _plot_reconstruction(self, target, pred, mask, variate_indices, save_path):
+    def _plot_reconstruction(self, target, pred, mask, variate_indices, save_path,
+                             phone_labels=None, sentence_info=None):
         """
         Plot reconstruction for multiple variates with masked regions shaded.
 
@@ -1054,11 +1067,25 @@ class Exp_MAE_Pretrain(Exp_Basic):
             mask: [L] boolean mask
             variate_indices: list of variate indices to plot
             save_path: output PDF path
+            phone_labels: [L] array of phone strings per frame, or None
+            sentence_info: dict with 'sentence', 'speaker_id', 'sentence_id' or None
         """
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+
+        # Pre-compute phoneme segments if labels available
+        phone_segments = []  # list of (start, end, label)
+        if phone_labels is not None:
+            cur_phone = phone_labels[0]
+            seg_start = 0
+            for t in range(1, len(phone_labels)):
+                if phone_labels[t] != cur_phone:
+                    phone_segments.append((seg_start, t, cur_phone))
+                    cur_phone = phone_labels[t]
+                    seg_start = t
+            phone_segments.append((seg_start, len(phone_labels), cur_phone))
 
         n_vars = len(variate_indices)
         fig, axes = plt.subplots(n_vars, 1, figsize=(14, 2.5 * n_vars), sharex=True)
@@ -1093,13 +1120,36 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 for s, e in zip(block_starts, block_ends):
                     ax.axvspan(s, e, alpha=0.15, color="red", label=None)
 
+            # Draw phoneme boundaries on all subplots
+            if phone_segments:
+                for seg_start, seg_end, phone in phone_segments:
+                    if seg_start > 0:
+                        ax.axvline(x=seg_start, color="gray", linewidth=0.5,
+                                   linestyle="--", alpha=0.6)
+
             ax.set_ylabel(f"Var {idx}", fontsize=9)
             if idx == variate_indices[0]:
                 ax.legend(loc="upper right", fontsize=8)
             ax.grid(True, alpha=0.3)
 
+        # Draw phoneme labels on the top subplot (after y-limits are finalized)
+        if phone_segments:
+            top_ax = axes[0]
+            ymin, ymax = top_ax.get_ylim()
+            for seg_start, seg_end, phone in phone_segments:
+                mid = (seg_start + seg_end) / 2
+                top_ax.text(mid, ymax, str(phone), ha="center", va="bottom",
+                            fontsize=6, color="purple", clip_on=False)
+
         axes[-1].set_xlabel("Frame", fontsize=10)
-        fig.suptitle("MAE Reconstruction (red shading = masked regions)", fontsize=12)
+        title = "MAE Reconstruction (red shading = masked regions)"
+        if sentence_info is not None:
+            title += (
+                f"\nSentence {sentence_info['sentence_id']} "
+                f"[{sentence_info['speaker_id']}]: "
+                f"\"{sentence_info['sentence']}\""
+            )
+        fig.suptitle(title, fontsize=12)
         plt.tight_layout()
         plt.savefig(save_path, bbox_inches="tight", dpi=150)
         plt.close()

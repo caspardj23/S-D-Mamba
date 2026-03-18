@@ -6,6 +6,7 @@ from experiments.exp_recursive_forecasting import Exp_Recursive_Forecast
 from experiments.exp_speech_forecasting import Exp_Speech_Forecast
 from experiments.exp_mae_pretrain import Exp_MAE_Pretrain
 from experiments.exp_mae_finetune import Exp_MAE_Finetune
+from experiments.exp_probe import Exp_Probe
 # from experiments.exp_patched_mae_pretrain import Exp_Patched_MAE_Pretrain
 # from experiments.exp_patched_mae_finetune import Exp_Patched_MAE_Finetune
 import random
@@ -407,6 +408,28 @@ if __name__ == "__main__":
         help="weight for velocity (temporal difference) loss in fine-tuning (default: 0.0)",
     )
 
+    # Probe arguments
+    parser.add_argument(
+        "--probe_task",
+        type=str,
+        default="speaker",
+        choices=["speaker", "phoneme", "manner"],
+        help="probe classification task (default: speaker)",
+    )
+    parser.add_argument(
+        "--probe_type",
+        type=str,
+        default="linear",
+        choices=["linear", "mlp"],
+        help="probe head type: linear or mlp (default: linear)",
+    )
+    parser.add_argument(
+        "--phoneme_label_path",
+        type=str,
+        default=None,
+        help="path to phoneme_labels.npz for phoneme/manner probes",
+    )
+
     args = parser.parse_args()
 
     # Set lr_encoder default if not specified
@@ -438,6 +461,8 @@ if __name__ == "__main__":
         Exp = Exp_Patched_MAE_Pretrain
     elif args.exp_name == "patched_mae_finetune":  # Patched MAE fine-tuning (Phase 2)
         Exp = Exp_Patched_MAE_Finetune
+    elif args.exp_name == "probe":  # Probing encoder representations
+        Exp = None  # handled separately below
     elif args.exp_name == "partial_train":  # See Figure 8 of our paper, for the detail
         Exp = Exp_Long_Term_Forecast_Partial
     elif args.exp_name == "speech":  # Speech time series forecasting
@@ -447,6 +472,20 @@ if __name__ == "__main__":
     import torch.multiprocessing
 
     torch.multiprocessing.set_sharing_strategy("file_system")
+
+    # --- Probe experiment (special path, not using standard Exp class) ---
+    if args.exp_name == "probe":
+        setting = "probe_{}_{}_{}_dm{}_el{}_sl{}".format(
+            args.probe_task, args.probe_type, args.model_id,
+            args.d_model, args.e_layers, args.seq_len,
+        )
+        print(f">>>>>>>probing : {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>")
+        probe_exp = Exp_Probe(args)
+        probe_exp.run(setting)
+        print(f">>>>>>>probe done : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+        torch.cuda.empty_cache()
+        import sys
+        sys.exit(0)
 
     if args.is_training == 1:
         for ii in range(args.itr):

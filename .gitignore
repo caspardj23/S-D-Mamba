@@ -54,6 +54,7 @@ test.txt
 bin/
 test_results_patched_mae/
 result_patched_mae_pretrain.txt
+oldtxt/
 # scripts/
 
 *.md

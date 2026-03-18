@@ -709,7 +709,7 @@ class Dataset_Haskins_MAE(Dataset):
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
         # Extract feature columns (everything except metadata)
-        meta_cols = {"sentence_id", "speaker_id", "time_s", "date"}
+        meta_cols = {"sentence_id", "sentence_group", "speaker_id", "time_s", "phone", "date"}
         if self.features == "M" or self.features == "MS":
             feature_cols = [c for c in df_raw.columns if c not in meta_cols]
         elif self.features == "S":
@@ -719,35 +719,71 @@ class Dataset_Haskins_MAE(Dataset):
         sentence_ids = df_raw["sentence_id"].values
         speaker_ids = df_raw["speaker_id"].values
 
-        # Build sentence table: sentence_id → (start_row, end_row, speaker)
+        # Store phone labels if available (for visualization)
+        if "phone" in df_raw.columns:
+            self.phone_labels = df_raw["phone"].values
+        else:
+            self.phone_labels = None
+
+        # Store per-frame sentence_id for metadata lookup
+        self.sentence_ids_per_frame = sentence_ids.copy()
+
+        # Load sentence text lookup from ema_7_sentences.csv if it exists
+        self.sentence_text_map = {}
+        sentences_csv = os.path.join(self.root_path, "ema_7_sentences.csv")
+        if os.path.exists(sentences_csv):
+            df_sent = pd.read_csv(sentences_csv)
+            for _, row in df_sent.iterrows():
+                self.sentence_text_map[int(row["sentence_id"])] = {
+                    "sentence": row["sentence"],
+                    "speaker_id": row["speaker_id"],
+                    "sentence_group": row["sentence_group"],
+                }
+
+        # Build sentence table: sentence_id → (start_row, end_row, speaker, group)
         sentences = {}
-        for sid in np.unique(sentence_ids):
-            rows = np.where(sentence_ids == sid)[0]
-            sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]])
+        if "sentence_group" in df_raw.columns:
+            sentence_groups = df_raw["sentence_group"].values
+            for sid in np.unique(sentence_ids):
+                rows = np.where(sentence_ids == sid)[0]
+                sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]],
+                                  sentence_groups[rows[0]])
+        else:
+            for sid in np.unique(sentence_ids):
+                rows = np.where(sentence_ids == sid)[0]
+                sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]], sid)
 
-        # Group sentences by speaker
-        speaker_sentences = defaultdict(list)
-        for sid, (start, end, speaker) in sentences.items():
-            speaker_sentences[speaker].append((sid, start, end))
+        # Split by sentence_group to prevent data leakage across speakers
+        # All sentences with the same group (same text, different speakers/reps)
+        # go into the same split
+        all_groups = sorted(set(grp for _, _, _, grp in sentences.values()))
+        n_groups = len(all_groups)
+        n_train_g = int(n_groups * 0.7)
+        n_test_g = int(n_groups * 0.2)
+        n_val_g = n_groups - n_train_g - n_test_g
 
-        # Sort by sentence_id within each speaker for reproducibility
-        for speaker in speaker_sentences:
-            speaker_sentences[speaker].sort(key=lambda x: x[0])
+        train_groups = set(all_groups[:n_train_g])
+        val_groups = set(all_groups[n_train_g:n_train_g + n_val_g])
+        test_groups = set(all_groups[n_train_g + n_val_g:])
 
-        # Split sentences per speaker: 70% train, 10% val, 20% test
         train_sents = []
         val_sents = []
         test_sents = []
+        n_speakers = len(set(speaker_ids))
 
-        for speaker, sents in sorted(speaker_sentences.items()):
-            n = len(sents)
-            n_train = int(n * 0.7)
-            n_test = int(n * 0.2)
-            n_val = n - n_train - n_test
+        for sid, (start, end, speaker, grp) in sentences.items():
+            entry = (sid, start, end)
+            if grp in train_groups:
+                train_sents.append(entry)
+            elif grp in val_groups:
+                val_sents.append(entry)
+            else:
+                test_sents.append(entry)
 
-            train_sents.extend(sents[:n_train])
-            val_sents.extend(sents[n_train:n_train + n_val])
-            test_sents.extend(sents[n_train + n_val:])
+        # Sort for reproducibility
+        train_sents.sort(key=lambda x: x[0])
+        val_sents.sort(key=lambda x: x[0])
+        test_sents.sort(key=lambda x: x[0])
 
         # Fit scaler on training sentences only
         if self.scale:
@@ -784,11 +820,15 @@ class Dataset_Haskins_MAE(Dataset):
         # Dummy timestamps (interface required, not used by MAE)
         self.data_stamp = np.zeros((len(all_data), 4), dtype=np.float32)
 
-        n_speakers = len(speaker_sentences)
         print(f"  [Dataset_Haskins_MAE] {n_speakers} speakers, "
               f"{len(sentences)} total sentences, "
+              f"{n_groups} sentence groups, "
               f"{len(all_data)} total frames, "
               f"{all_data.shape[1]} variates")
+        print(f"  [Dataset_Haskins_MAE] split by sentence_group: "
+              f"train={len(train_groups)}g/{len(train_sents)}s, "
+              f"val={len(val_groups)}g/{len(val_sents)}s, "
+              f"test={len(test_groups)}g/{len(test_sents)}s")
         print(f"  [Dataset_Haskins_MAE] {self.flag}: {len(split_sents)} sentences, "
               f"{len(self.window_starts)} windows "
               f"(stride={self.stride}, seq_len={self.seq_len}, skipped={skipped})")
@@ -803,6 +843,259 @@ class Dataset_Haskins_MAE(Dataset):
         seq_y_mark = seq_x_mark
 
         return seq_x, seq_y, seq_x_mark, seq_y_mark
+
+    def __len__(self):
+        return len(self.window_starts)
+
+    def get_phone_labels(self, index):
+        """Return phone labels for a given window index, or None if unavailable."""
+        if self.phone_labels is None:
+            return None
+        start = self.window_starts[index]
+        s_end = start + self.seq_len
+        return self.phone_labels[start:s_end]
+
+    def get_sentence_info(self, index):
+        """Return sentence text and metadata for a given window index, or None."""
+        start = self.window_starts[index]
+        sid = int(self.sentence_ids_per_frame[start])
+        if sid in self.sentence_text_map:
+            info = self.sentence_text_map[sid]
+            return {
+                "sentence_id": sid,
+                "sentence": info["sentence"],
+                "speaker_id": info["speaker_id"],
+            }
+        return None
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
+
+
+class Dataset_Haskins_Probe(Dataset):
+    """
+    Haskins EMA dataset for probing encoder representations.
+
+    Returns per-frame windows of EMA data with classification labels.
+    Supports multiple probe tasks:
+      - 'speaker': classify speaker identity (8 classes, labels from CSV)
+      - 'phoneme': classify phoneme identity (~40 classes, from external label file)
+      - 'manner': classify manner of articulation (~7 classes, derived from phoneme)
+
+    Phoneme/manner probes require a pre-computed label file (NumPy .npz) with
+    per-frame phoneme IDs aligned to the EMA CSV rows. See
+    scripts/prepare_haskins_phoneme_labels.py to generate this file.
+
+    Uses the same sentence-aware per-speaker 70/10/20 split as Dataset_Haskins_MAE.
+    """
+
+    # ARPABET manner-of-articulation mapping
+    MANNER_MAP = {
+        # Stops
+        'B': 'stop', 'D': 'stop', 'G': 'stop', 'K': 'stop', 'P': 'stop', 'T': 'stop',
+        # Fricatives
+        'CH': 'fricative', 'DH': 'fricative', 'F': 'fricative', 'HH': 'fricative',
+        'JH': 'fricative', 'S': 'fricative', 'SH': 'fricative', 'TH': 'fricative',
+        'V': 'fricative', 'Z': 'fricative', 'ZH': 'fricative',
+        # Nasals
+        'M': 'nasal', 'N': 'nasal', 'NG': 'nasal',
+        # Approximants
+        'L': 'approximant', 'R': 'approximant', 'W': 'approximant', 'Y': 'approximant',
+        # Vowels (all ARPABET vowels including diphthongs)
+        'AA': 'vowel', 'AE': 'vowel', 'AH': 'vowel', 'AO': 'vowel', 'AW': 'vowel',
+        'AY': 'vowel', 'EH': 'vowel', 'ER': 'vowel', 'EY': 'vowel', 'IH': 'vowel',
+        'IY': 'vowel', 'OW': 'vowel', 'OY': 'vowel', 'UH': 'vowel', 'UW': 'vowel',
+        # Silence
+        'SIL': 'silence', 'sp': 'silence', 'sil': 'silence', '': 'silence',
+    }
+    MANNER_CLASSES = ['silence', 'stop', 'fricative', 'nasal', 'approximant', 'vowel']
+
+    def __init__(
+        self,
+        root_path,
+        flag="train",
+        size=None,
+        features="M",
+        data_path="ema_8_pos_xz.csv",
+        target="15",
+        scale=True,
+        timeenc=1,
+        freq="h",
+        stride=80,
+        probe_task="speaker",
+        phoneme_label_path=None,
+    ):
+        if size is None:
+            self.seq_len = 160
+            self.label_len = 0
+            self.pred_len = 160
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
+
+        assert flag in ["train", "val", "test"]
+        assert probe_task in ["speaker", "phoneme", "manner"]
+        self.flag = flag
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.timeenc = timeenc
+        self.freq = freq
+        self.root_path = root_path
+        self.data_path = data_path
+        self.stride = stride
+        self.probe_task = probe_task
+        self.phoneme_label_path = phoneme_label_path
+
+        self.__read_data__()
+
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+
+        # Extract feature columns
+        meta_cols = {"sentence_id", "sentence_group", "speaker_id", "time_s", "phone", "date"}
+        if self.features == "M" or self.features == "MS":
+            feature_cols = [c for c in df_raw.columns if c not in meta_cols]
+        elif self.features == "S":
+            feature_cols = [self.target]
+
+        all_data = df_raw[feature_cols].values.astype(np.float32)
+        sentence_ids = df_raw["sentence_id"].values
+        speaker_ids = df_raw["speaker_id"].values
+
+        # Build speaker label mapping
+        unique_speakers = sorted(set(speaker_ids))
+        self.speaker_to_idx = {s: i for i, s in enumerate(unique_speakers)}
+        self.num_speakers = len(unique_speakers)
+        speaker_labels = np.array([self.speaker_to_idx[s] for s in speaker_ids], dtype=np.int64)
+
+        # Load phoneme labels if needed
+        if self.probe_task in ("phoneme", "manner"):
+            if self.phoneme_label_path is None:
+                # Try default path
+                self.phoneme_label_path = os.path.join(
+                    self.root_path, "phoneme_labels.npz"
+                )
+            if not os.path.exists(self.phoneme_label_path):
+                raise FileNotFoundError(
+                    f"Phoneme label file not found: {self.phoneme_label_path}\n"
+                    f"Run scripts/prepare_haskins_phoneme_labels.py first to generate it."
+                )
+            label_data = np.load(self.phoneme_label_path, allow_pickle=True)
+            phoneme_ids = label_data["phoneme_ids"]  # [N_frames] int array
+            self.phoneme_names = label_data["phoneme_names"].tolist()  # list of phone strings
+            self.num_phonemes = len(self.phoneme_names)
+
+            if self.probe_task == "manner":
+                # Map phoneme names to manner classes
+                manner_to_idx = {m: i for i, m in enumerate(self.MANNER_CLASSES)}
+                phoneme_to_manner = np.zeros(self.num_phonemes, dtype=np.int64)
+                for pid, pname in enumerate(self.phoneme_names):
+                    # Strip stress digits (e.g., 'AH0' -> 'AH')
+                    clean = pname.rstrip('0123456789')
+                    manner = self.MANNER_MAP.get(clean, 'silence')
+                    phoneme_to_manner[pid] = manner_to_idx[manner]
+                self.frame_labels = phoneme_to_manner[phoneme_ids]
+                self.num_classes = len(self.MANNER_CLASSES)
+                self.class_names = self.MANNER_CLASSES
+            else:
+                self.frame_labels = phoneme_ids
+                self.num_classes = self.num_phonemes
+                self.class_names = self.phoneme_names
+        else:
+            # Speaker task: label is per-window (constant within sentence)
+            self.frame_labels = speaker_labels
+            self.num_classes = self.num_speakers
+            self.class_names = unique_speakers
+
+        # Build sentence table: sentence_id → (start_row, end_row, speaker, group)
+        sentences = {}
+        if "sentence_group" in df_raw.columns:
+            sentence_groups = df_raw["sentence_group"].values
+            for sid in np.unique(sentence_ids):
+                rows = np.where(sentence_ids == sid)[0]
+                sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]],
+                                  sentence_groups[rows[0]])
+        else:
+            for sid in np.unique(sentence_ids):
+                rows = np.where(sentence_ids == sid)[0]
+                sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]], sid)
+
+        # Split by sentence_group to prevent data leakage across speakers
+        all_groups = sorted(set(grp for _, _, _, grp in sentences.values()))
+        n_groups = len(all_groups)
+        n_train_g = int(n_groups * 0.7)
+        n_test_g = int(n_groups * 0.2)
+        n_val_g = n_groups - n_train_g - n_test_g
+
+        train_groups = set(all_groups[:n_train_g])
+        val_groups = set(all_groups[n_train_g:n_train_g + n_val_g])
+        test_groups = set(all_groups[n_train_g + n_val_g:])
+
+        train_sents, val_sents, test_sents = [], [], []
+        n_speakers = len(set(speaker_ids))
+        for sid, (start, end, speaker, grp) in sentences.items():
+            entry = (sid, start, end)
+            if grp in train_groups:
+                train_sents.append(entry)
+            elif grp in val_groups:
+                val_sents.append(entry)
+            else:
+                test_sents.append(entry)
+
+        train_sents.sort(key=lambda x: x[0])
+        val_sents.sort(key=lambda x: x[0])
+        test_sents.sort(key=lambda x: x[0])
+
+        # Fit scaler on training data
+        if self.scale:
+            train_chunks = [all_data[s:e] for _, s, e in train_sents]
+            train_all = np.concatenate(train_chunks, axis=0)
+            self.scaler.fit(train_all)
+            all_data = self.scaler.transform(all_data)
+
+        if self.flag == "train":
+            split_sents = train_sents
+        elif self.flag == "val":
+            split_sents = val_sents
+        else:
+            split_sents = test_sents
+
+        # Build windows
+        window_starts = []
+        window_len = self.seq_len
+        skipped = 0
+        for sid, seg_start, seg_end in split_sents:
+            seg_len = seg_end - seg_start
+            if seg_len < window_len:
+                skipped += 1
+                continue
+            n_windows = (seg_len - window_len) // self.stride + 1
+            for w in range(n_windows):
+                window_starts.append(seg_start + w * self.stride)
+
+        self.window_starts = np.array(window_starts, dtype=np.int64)
+        self.all_data = all_data
+        self.all_labels = self.frame_labels
+
+        print(f"  [Dataset_Haskins_Probe] task={self.probe_task}, "
+              f"num_classes={self.num_classes}, "
+              f"speakers={self.num_speakers}")
+        print(f"  [Dataset_Haskins_Probe] {self.flag}: "
+              f"{len(split_sents)} sentences, "
+              f"{len(self.window_starts)} windows "
+              f"(stride={self.stride}, seq_len={self.seq_len}, skipped={skipped})")
+
+    def __getitem__(self, index):
+        start = self.window_starts[index]
+        s_end = start + self.seq_len
+
+        seq_x = self.all_data[start:s_end]
+        labels = self.all_labels[start:s_end]
+
+        return seq_x, labels
 
     def __len__(self):
         return len(self.window_starts)
@@ -860,7 +1153,7 @@ class Dataset_Haskins_Forecast(Dataset):
         self.scaler = StandardScaler()
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
-        meta_cols = {"sentence_id", "speaker_id", "time_s", "date"}
+        meta_cols = {"sentence_id", "sentence_group", "speaker_id", "time_s", "phone", "date"}
         if self.features == "M" or self.features == "MS":
             feature_cols = [c for c in df_raw.columns if c not in meta_cols]
         elif self.features == "S":
@@ -870,30 +1163,44 @@ class Dataset_Haskins_Forecast(Dataset):
         sentence_ids = df_raw["sentence_id"].values
         speaker_ids = df_raw["speaker_id"].values
 
-        # Build sentence table: sentence_id → (start_row, end_row, speaker)
+        # Build sentence table: sentence_id → (start_row, end_row, speaker, group)
         sentences = {}
-        for sid in np.unique(sentence_ids):
-            rows = np.where(sentence_ids == sid)[0]
-            sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]])
+        if "sentence_group" in df_raw.columns:
+            sentence_groups = df_raw["sentence_group"].values
+            for sid in np.unique(sentence_ids):
+                rows = np.where(sentence_ids == sid)[0]
+                sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]],
+                                  sentence_groups[rows[0]])
+        else:
+            for sid in np.unique(sentence_ids):
+                rows = np.where(sentence_ids == sid)[0]
+                sentences[sid] = (rows[0], rows[-1] + 1, speaker_ids[rows[0]], sid)
 
-        # Group sentences by speaker
-        speaker_sentences = defaultdict(list)
-        for sid, (start, end, speaker) in sentences.items():
-            speaker_sentences[speaker].append((sid, start, end))
+        # Split by sentence_group to prevent data leakage across speakers
+        all_groups = sorted(set(grp for _, _, _, grp in sentences.values()))
+        n_groups = len(all_groups)
+        n_train_g = int(n_groups * 0.7)
+        n_test_g = int(n_groups * 0.2)
+        n_val_g = n_groups - n_train_g - n_test_g
 
-        for speaker in speaker_sentences:
-            speaker_sentences[speaker].sort(key=lambda x: x[0])
+        train_groups = set(all_groups[:n_train_g])
+        val_groups = set(all_groups[n_train_g:n_train_g + n_val_g])
+        test_groups = set(all_groups[n_train_g + n_val_g:])
 
-        # Split sentences per speaker: 70% train, 10% val, 20% test
         train_sents, val_sents, test_sents = [], [], []
-        for speaker, sents in sorted(speaker_sentences.items()):
-            n = len(sents)
-            n_train = int(n * 0.7)
-            n_test = int(n * 0.2)
-            n_val = n - n_train - n_test
-            train_sents.extend(sents[:n_train])
-            val_sents.extend(sents[n_train:n_train + n_val])
-            test_sents.extend(sents[n_train + n_val:])
+        n_speakers = len(set(speaker_ids))
+        for sid, (start, end, speaker, grp) in sentences.items():
+            entry = (sid, start, end)
+            if grp in train_groups:
+                train_sents.append(entry)
+            elif grp in val_groups:
+                val_sents.append(entry)
+            else:
+                test_sents.append(entry)
+
+        train_sents.sort(key=lambda x: x[0])
+        val_sents.sort(key=lambda x: x[0])
+        test_sents.sort(key=lambda x: x[0])
 
         # Fit scaler on training sentences only
         if self.scale:
@@ -926,10 +1233,14 @@ class Dataset_Haskins_Forecast(Dataset):
         self.all_data = all_data
         self.data_stamp = np.zeros((len(all_data), 4), dtype=np.float32)
 
-        n_speakers = len(speaker_sentences)
         print(f"  [Dataset_Haskins_Forecast] {n_speakers} speakers, "
               f"{len(sentences)} total sentences, "
+              f"{n_groups} sentence groups, "
               f"{all_data.shape[1]} variates")
+        print(f"  [Dataset_Haskins_Forecast] split by sentence_group: "
+              f"train={len(train_groups)}g/{len(train_sents)}s, "
+              f"val={len(val_groups)}g/{len(val_sents)}s, "
+              f"test={len(test_groups)}g/{len(test_sents)}s")
         print(f"  [Dataset_Haskins_Forecast] {self.flag}: {len(split_sents)} sentences, "
               f"{len(self.window_starts)} windows "
               f"(stride={self.stride}, seq_len={self.seq_len}, pred_len={self.pred_len}, skipped={skipped})")
