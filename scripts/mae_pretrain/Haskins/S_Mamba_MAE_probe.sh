@@ -6,9 +6,9 @@
 # to evaluate whether the representations encode speech-relevant structure.
 #
 # Probe tasks:
-#   - speaker: Speaker identification (8 classes) — works immediately
-#   - phoneme: Phoneme classification (~40 classes) — requires phoneme_labels.npz
-#   - manner:  Manner of articulation (6 classes) — requires phoneme_labels.npz
+#   - speaker: Speaker identification (8 classes)
+#   - phoneme: Phoneme classification (~40 classes) — reads phone column from CSV
+#   - manner:  Manner of articulation (6 classes) — derived from phone column
 #
 # Probe types:
 #   - linear: Single linear layer (tests linear separability)
@@ -28,12 +28,11 @@ export CUDA_VISIBLE_DEVICES=0
 PROBE_TASK=${PROBE_TASK:-speaker}
 PROBE_TYPE=${PROBE_TYPE:-linear}
 PRETRAIN_CHECKPOINT=${PRETRAIN_CHECKPOINT:-}
-PHONEME_LABEL_PATH=${PHONEME_LABEL_PATH:-}
 
 # Encoder config (must match pre-training)
-D_MODEL=${D_MODEL:-192}
+D_MODEL=${D_MODEL:-128}
 E_LAYERS=${E_LAYERS:-3}
-D_FF=${D_FF:-384}
+D_FF=${D_FF:-256}
 D_STATE=${D_STATE:-32}
 D_CONV_TEMPORAL=${D_CONV_TEMPORAL:-4}
 EXPAND_TEMPORAL=${EXPAND_TEMPORAL:-2}
@@ -68,15 +67,10 @@ if [ -n "$PRETRAIN_CHECKPOINT" ]; then
   CKPT_ARG="--pretrain_checkpoint $PRETRAIN_CHECKPOINT"
 fi
 
-PHONE_ARG=""
-if [ -n "$PHONEME_LABEL_PATH" ]; then
-  PHONE_ARG="--phoneme_label_path $PHONEME_LABEL_PATH"
-fi
-
 python -u run.py \
   --is_training 1 \
   --root_path ./dataset/haskins/ \
-  --data_path ema_7_pos_xz.csv \
+  --data_path ema_7_pos_xz_phone.csv \
   --model_id "probe_${PROBE_TASK}_${PROBE_TYPE}${LABEL:+_${LABEL}}" \
   --model S_Mamba_MAE \
   --data haskins_mae \
@@ -103,7 +97,6 @@ python -u run.py \
   --probe_type $PROBE_TYPE \
   --mae_stride $MAE_STRIDE \
   $CKPT_ARG \
-  $PHONE_ARG \
 
 echo "============================================"
 echo "Probing complete. Results in ./probe_results/"

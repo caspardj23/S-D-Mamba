@@ -113,7 +113,6 @@ class Exp_Probe:
 
     def _get_data(self, flag):
         """Build probe dataset and dataloader."""
-        phoneme_label_path = getattr(self.args, "phoneme_label_path", None)
         stride = getattr(self.args, "mae_stride", 80)
 
         dataset = Dataset_Haskins_Probe(
@@ -125,7 +124,6 @@ class Exp_Probe:
             scale=True,
             stride=stride,
             probe_task=self.probe_task,
-            phoneme_label_path=phoneme_label_path,
         )
 
         shuffle = flag == "train"

@@ -918,12 +918,11 @@ class Dataset_Haskins_Probe(Dataset):
     Returns per-frame windows of EMA data with classification labels.
     Supports multiple probe tasks:
       - 'speaker': classify speaker identity (8 classes, labels from CSV)
-      - 'phoneme': classify phoneme identity (~40 classes, from external label file)
+      - 'phoneme': classify phoneme identity (~40 classes, from CSV phone column)
       - 'manner': classify manner of articulation (~7 classes, derived from phoneme)
 
-    Phoneme/manner probes require a pre-computed label file (NumPy .npz) with
-    per-frame phoneme IDs aligned to the EMA CSV rows. See
-    scripts/prepare_haskins_phoneme_labels.py to generate this file.
+    Phoneme/manner probes require the CSV to have a 'phone' column with per-frame
+    phoneme labels (e.g. ema_7_pos_xz_phone.csv).
 
     Uses the same sentence-aware per-speaker 70/10/20 split as Dataset_Haskins_MAE.
     """
@@ -985,7 +984,6 @@ class Dataset_Haskins_Probe(Dataset):
         self.data_path = data_path
         self.stride = stride
         self.probe_task = probe_task
-        self.phoneme_label_path = phoneme_label_path
 
         self.__read_data__()
 
@@ -1010,21 +1008,23 @@ class Dataset_Haskins_Probe(Dataset):
         self.num_speakers = len(unique_speakers)
         speaker_labels = np.array([self.speaker_to_idx[s] for s in speaker_ids], dtype=np.int64)
 
-        # Load phoneme labels if needed
+        # Load phoneme labels from CSV phone column
         if self.probe_task in ("phoneme", "manner"):
-            if self.phoneme_label_path is None:
-                # Try default path
-                self.phoneme_label_path = os.path.join(
-                    self.root_path, "phoneme_labels.npz"
+            if "phone" not in df_raw.columns:
+                raise ValueError(
+                    f"CSV has no 'phone' column. Use ema_7_pos_xz_phone.csv "
+                    f"for phoneme/manner probing."
                 )
-            if not os.path.exists(self.phoneme_label_path):
-                raise FileNotFoundError(
-                    f"Phoneme label file not found: {self.phoneme_label_path}\n"
-                    f"Run scripts/prepare_haskins_phoneme_labels.py first to generate it."
-                )
-            label_data = np.load(self.phoneme_label_path, allow_pickle=True)
-            phoneme_ids = label_data["phoneme_ids"]  # [N_frames] int array
-            self.phoneme_names = label_data["phoneme_names"].tolist()  # list of phone strings
+            phone_labels = df_raw["phone"].fillna("sp").values
+            # Build phone → integer ID mapping (sp=0, real phonemes 1..N)
+            unique_phones = sorted(set(phone_labels) - {"sp"})
+            phone_to_id = {"sp": 0}
+            for i, ph in enumerate(unique_phones, start=1):
+                phone_to_id[ph] = i
+            phoneme_ids = np.array(
+                [phone_to_id[p] for p in phone_labels], dtype=np.int64
+            )
+            self.phoneme_names = ["sp"] + unique_phones
             self.num_phonemes = len(self.phoneme_names)
 
             if self.probe_task == "manner":
