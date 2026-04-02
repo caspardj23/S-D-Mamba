@@ -20,6 +20,8 @@ import time
 import warnings
 import numpy as np
 
+from model.S_Mamba_MAE import generate_phoneme_mask
+
 warnings.filterwarnings("ignore")
 
 
@@ -72,8 +74,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
         total_masked_ratio = []
         self.model.eval()
 
+        mask_strategy = getattr(self.args, "mask_strategy", "block")
+        n_mask_phonemes = getattr(self.args, "n_mask_phonemes", 4)
+
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, batch_phone_ids) in enumerate(
                 vali_loader
             ):
                 if i >= 2000:
@@ -81,8 +86,15 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
                 batch_x = batch_x.float().to(self.device)
 
+                # Generate phoneme mask if using phoneme masking strategy
+                mask = None
+                if mask_strategy == "phoneme":
+                    mask = generate_phoneme_mask(
+                        batch_phone_ids.long(), n_mask=n_mask_phonemes, device=self.device
+                    )
+
                 # Forward pass (MAE model returns dict with loss)
-                result = self.model(batch_x)
+                result = self.model(batch_x, mask=mask)
 
                 loss = result["loss"]
                 mask = result["mask"]
@@ -141,6 +153,9 @@ class Exp_MAE_Pretrain(Exp_Basic):
         epoch_vali_losses = []  # per-epoch validation loss
 
         # Training loop
+        mask_strategy = getattr(self.args, "mask_strategy", "block")
+        n_mask_phonemes = getattr(self.args, "n_mask_phonemes", 4)
+
         global_step = 0
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -149,7 +164,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
             self.model.train()
             epoch_time = time.time()
 
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, batch_phone_ids) in enumerate(
                 train_loader
             ):
                 iter_count += 1
@@ -157,9 +172,16 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
                 batch_x = batch_x.float().to(self.device)
 
+                # Generate phoneme mask if using phoneme masking strategy
+                mask = None
+                if mask_strategy == "phoneme":
+                    mask = generate_phoneme_mask(
+                        batch_phone_ids.long(), n_mask=n_mask_phonemes, device=self.device
+                    )
+
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        result = self.model(batch_x)
+                        result = self.model(batch_x, mask=mask)
                         loss = result["loss"]
 
                     scaler.scale(loss).backward()
@@ -170,7 +192,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
                     scaler.step(model_optim)
                     scaler.update()
                 else:
-                    result = self.model(batch_x)
+                    result = self.model(batch_x, mask=mask)
                     loss = result["loss"]
 
                     loss.backward()
@@ -454,6 +476,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
         all_preds = []
         all_targets = []
         all_masks = []
+        all_phone_ids = []
 
         N = self.args.enc_in  # number of variates
 
@@ -464,16 +487,26 @@ class Exp_MAE_Pretrain(Exp_Basic):
             int(n_test * frac) for frac in [0.0, 0.25, 0.5, 0.75]
         )
 
+        mask_strategy = getattr(self.args, "mask_strategy", "block")
+        n_mask_phonemes = getattr(self.args, "n_mask_phonemes", 4)
+
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, batch_phone_ids) in enumerate(
                 test_loader
             ):
-                if i >= 10000:
-                    break
+                # if i >= 10000:
+                #     break
 
                 batch_x = batch_x.float().to(self.device)
 
-                result = self.model(batch_x)
+                # Generate phoneme mask if using phoneme masking strategy
+                mask = None
+                if mask_strategy == "phoneme":
+                    mask = generate_phoneme_mask(
+                        batch_phone_ids.long(), n_mask=n_mask_phonemes, device=self.device
+                    )
+
+                result = self.model(batch_x, mask=mask)
                 pred = result["pred"]
                 target = result["target"]
                 mask = result["mask"]
@@ -503,6 +536,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 all_preds.append(pred.cpu().numpy())
                 all_targets.append(target.cpu().numpy())
                 all_masks.append(mask.cpu().numpy())
+                all_phone_ids.append(batch_phone_ids.numpy())
 
                 # --- Visualization plots (evenly spaced across test set) ---
                 if i in plot_batch_indices:
@@ -635,6 +669,59 @@ class Exp_MAE_Pretrain(Exp_Basic):
             per_var_coherence[v] = np.mean(coh[1:]) if len(coh) > 1 else 0.0
         coherence_full = np.mean(per_var_coherence)
 
+        # --- Per-phoneme metrics (masked positions only) ---
+        all_phone_ids_arr = np.concatenate(all_phone_ids, axis=0)  # [B, L]
+        id_to_phone = {}
+        if hasattr(test_data, "phone_to_id") and test_data.phone_to_id is not None:
+            id_to_phone = {v: k for k, v in test_data.phone_to_id.items()}
+
+        # Compute per-phoneme MSE and R2 on masked frames
+        mask_bool = all_masks.astype(bool)  # [B, L]
+        unique_phone_ids = np.unique(all_phone_ids_arr[mask_bool])
+        per_phoneme_mse = {}
+        per_phoneme_r2 = {}
+        per_phoneme_count = {}
+        for pid in unique_phone_ids:
+            # Frames where this phoneme is masked
+            phone_mask = mask_bool & (all_phone_ids_arr == pid)  # [B, L]
+            n_frames = phone_mask.sum()
+            if n_frames == 0:
+                continue
+            phone_name = id_to_phone.get(pid, f"id{pid}")
+            pred_ph = all_preds[phone_mask]   # [n_frames, N]
+            tgt_ph = all_targets[phone_mask]  # [n_frames, N]
+            mse_ph = np.mean((pred_ph - tgt_ph) ** 2)
+            # R2: 1 - SS_res / SS_tot (across all variates and frames)
+            ss_res = np.sum((tgt_ph - pred_ph) ** 2)
+            ss_tot = np.sum((tgt_ph - np.mean(tgt_ph, axis=0, keepdims=True)) ** 2)
+            r2_ph = 1.0 - ss_res / (ss_tot + 1e-8)
+            per_phoneme_mse[phone_name] = mse_ph
+            per_phoneme_r2[phone_name] = r2_ph
+            per_phoneme_count[phone_name] = int(n_frames)
+
+        # Compute average phoneme segment length (consecutive frames) across all test windows
+        per_phoneme_avg_len = {}
+        for pid in np.unique(all_phone_ids_arr):
+            phone_name = id_to_phone.get(pid, f"id{pid}")
+            segment_lengths = []
+            for b in range(all_phone_ids_arr.shape[0]):
+                row = all_phone_ids_arr[b]  # [L]
+                # Find consecutive runs of this phoneme
+                is_pid = (row == pid)
+                # Diff to find segment boundaries
+                d = np.diff(is_pid.astype(np.int32))
+                starts = np.where(d == 1)[0] + 1
+                ends = np.where(d == -1)[0] + 1
+                # Handle edge cases: segment starts at frame 0 or ends at last frame
+                if is_pid[0]:
+                    starts = np.concatenate([[0], starts])
+                if is_pid[-1]:
+                    ends = np.concatenate([ends, [len(row)]])
+                for s, e in zip(starts, ends):
+                    segment_lengths.append(e - s)
+            if segment_lengths:
+                per_phoneme_avg_len[phone_name] = np.mean(segment_lengths)
+
         print(
             f"MAE Test Results:\n"
             f"  Masked MSE:        {avg_masked:.6f}\n"
@@ -656,6 +743,23 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 f"{per_var_delta_mse[v]:10.6f}  {per_var_amp_ratio[v]:8.4f}  {per_var_coherence[v]:9.4f}"
             )
 
+        # Per-phoneme metrics table (masked positions only)
+        if per_phoneme_mse:
+            print(f"\n  Per-Phoneme Metrics (masked frames only):")
+            print(f"  {'Phoneme':>10s}  {'MSE':>10s}  {'R2':>10s}  {'#Frames':>8s}  {'AvgLen':>7s}")
+            print(f"  {'----------':>10s}  {'----------':>10s}  {'----------':>10s}  {'--------':>8s}  {'-------':>7s}")
+            for ph in sorted(per_phoneme_mse.keys()):
+                avg_len_str = f"{per_phoneme_avg_len[ph]:7.1f}" if ph in per_phoneme_avg_len else "    N/A"
+                print(
+                    f"  {ph:>10s}  {per_phoneme_mse[ph]:10.6f}  "
+                    f"{per_phoneme_r2[ph]:10.6f}  {per_phoneme_count[ph]:8d}  {avg_len_str}"
+                )
+            # Summary averages (unweighted across phonemes)
+            avg_ph_mse = np.mean(list(per_phoneme_mse.values()))
+            avg_ph_r2 = np.mean(list(per_phoneme_r2.values()))
+            print(f"  {'---':>10s}  {'----------':>10s}  {'----------':>10s}")
+            print(f"  {'avg':>10s}  {avg_ph_mse:10.6f}  {avg_ph_r2:10.6f}")
+
         # Save results
         folder_results = f"./results/{setting}/"
         if not os.path.exists(folder_results):
@@ -676,6 +780,16 @@ class Exp_MAE_Pretrain(Exp_Basic):
             amp_ratio=per_var_amp_ratio,
             coherence=per_var_coherence,
         )
+
+        # Save per-phoneme metrics
+        if per_phoneme_mse:
+            np.savez(
+                os.path.join(folder_results, "mae_per_phoneme_metrics.npz"),
+                phonemes=np.array(sorted(per_phoneme_mse.keys())),
+                mse=np.array([per_phoneme_mse[ph] for ph in sorted(per_phoneme_mse.keys())]),
+                r2=np.array([per_phoneme_r2[ph] for ph in sorted(per_phoneme_mse.keys())]),
+                count=np.array([per_phoneme_count[ph] for ph in sorted(per_phoneme_mse.keys())]),
+            )
 
         f = open("result_mae_pretrain.txt", "a")
         f.write(f"{setting}\n")
@@ -699,6 +813,14 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 f"amp_ratio={per_var_amp_ratio[v]:.4f} "
                 f"coherence={per_var_coherence[v]:.4f}\n"
             )
+        if per_phoneme_mse:
+            f.write("  Per-phoneme (masked):\n")
+            for ph in sorted(per_phoneme_mse.keys()):
+                f.write(
+                    f"    {ph}: mse={per_phoneme_mse[ph]:.6f} "
+                    f"r2={per_phoneme_r2[ph]:.6f} "
+                    f"n_frames={per_phoneme_count[ph]}\n"
+                )
         f.write("\n")
         f.close()
 
@@ -785,9 +907,10 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
                 np_preds_all = []
                 np_targets_all = []
+                np_context_all = []  # store raw inputs for plotting
 
                 with torch.no_grad():
-                    for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+                    for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, _phone_ids) in enumerate(
                         test_loader
                     ):
                         if i >= 2000:
@@ -806,9 +929,11 @@ class Exp_MAE_Pretrain(Exp_Basic):
 
                         np_preds_all.append(pred_next.cpu().numpy())
                         np_targets_all.append(target_next.cpu().numpy())
+                        np_context_all.append(batch_x.cpu().numpy())
 
                 np_preds_all = np.concatenate(np_preds_all, axis=0)  # [total, pl, N]
                 np_targets_all = np.concatenate(np_targets_all, axis=0)
+                all_context_x = np.concatenate(np_context_all, axis=0)
 
                 # Per-variate MSE
                 per_var_np_mse = np.mean(
@@ -850,15 +975,6 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 np_example_indices = [
                     min(idx, n_total - 1) for idx in np_example_indices
                 ]
-
-                # Collect full input sequences for context
-                all_context_x = []
-                with torch.no_grad():
-                    for bi, (batch_x, _, _, _) in enumerate(test_loader):
-                        all_context_x.append(batch_x.numpy())
-                        if len(np.concatenate(all_context_x, axis=0)) >= n_total:
-                            break
-                all_context_x = np.concatenate(all_context_x, axis=0)[:n_total]
 
                 for ex_rank, ex_idx in enumerate(np_example_indices):
                     sample_pred = np_preds_all[ex_idx]  # [pl, N]
@@ -1091,6 +1207,8 @@ class Exp_MAE_Pretrain(Exp_Basic):
         fig, axes = plt.subplots(n_vars, 1, figsize=(14, 2.5 * n_vars), sharex=True)
         if n_vars == 1:
             axes = [axes]
+        # Reserve space at top for title/sentence so they don't overlap the plot
+        fig.subplots_adjust(top=0.92)
 
         for ax, idx in zip(axes, variate_indices):
             ax.plot(
@@ -1124,7 +1242,7 @@ class Exp_MAE_Pretrain(Exp_Basic):
             if phone_segments:
                 for seg_start, seg_end, phone in phone_segments:
                     if seg_start > 0:
-                        ax.axvline(x=seg_start, color="gray", linewidth=0.5,
+                        ax.axvline(x=seg_start, color="purple", linewidth=1,
                                    linestyle="--", alpha=0.6)
 
             ax.set_ylabel(f"Var {idx}", fontsize=9)
@@ -1132,13 +1250,13 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 ax.legend(loc="upper right", fontsize=8)
             ax.grid(True, alpha=0.3)
 
-        # Draw phoneme labels on the top subplot (after y-limits are finalized)
+        # Draw phoneme labels on top of every subplot (after y-limits are finalized)
         if phone_segments:
-            top_ax = axes[0]
-            ymin, ymax = top_ax.get_ylim()
-            for seg_start, seg_end, phone in phone_segments:
-                mid = (seg_start + seg_end) / 2
-                top_ax.text(mid, ymax, str(phone), ha="center", va="bottom",
+            for ax in axes:
+                ymin, ymax = ax.get_ylim()
+                for seg_start, seg_end, phone in phone_segments:
+                    mid = (seg_start + seg_end) / 2
+                    ax.text(mid, ymax, str(phone), ha="center", va="bottom",
                             fontsize=6, color="purple", clip_on=False)
 
         axes[-1].set_xlabel("Frame", fontsize=10)
@@ -1149,8 +1267,8 @@ class Exp_MAE_Pretrain(Exp_Basic):
                 f"[{sentence_info['speaker_id']}]: "
                 f"\"{sentence_info['sentence']}\""
             )
-        fig.suptitle(title, fontsize=12)
-        plt.tight_layout()
+        fig.suptitle(title, fontsize=12, y=0.98)
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
         plt.savefig(save_path, bbox_inches="tight", dpi=150)
         plt.close()
 

@@ -39,6 +39,8 @@ SEQ_LEN=${SEQ_LEN:-160}
 PATIENCE=${PATIENCE:-50}
 MAE_STRIDE=${MAE_STRIDE:-80}
 ENC_IN=${ENC_IN:-16}
+MASK_STRATEGY=${MASK_STRATEGY:-block}
+N_MASK_PHONEMES=${N_MASK_PHONEMES:-4}
 ALPHA_MASK=${ALPHA_MASK:-1.0}
 BETA_NEXT=${BETA_NEXT:-0.0}
 GAMMA_SPECTRAL=${GAMMA_SPECTRAL:-0.0}
@@ -48,7 +50,7 @@ IS_TRAINING=${IS_TRAINING:-1}
 model_name=S_Mamba_MAE
 
 echo "============================================"
-echo "S-Mamba MAE Pre-Training on Haskins EMA (v1.0) with data fix with seperate sentences per speaker."
+echo "S-Mamba MAE Pre-Training on Haskins EMA (v1.1) with data fix with seperate sentences per speaker. Correct number of phoneme masking"
 echo "With phoneme labels shown in test plots."
 echo "  variates=${ENC_IN} (posX + posZ)"
 echo "  epochs=${TRAIN_EPOCHS}"
@@ -56,7 +58,8 @@ echo "  d_model=${D_MODEL}, e_layers=${E_LAYERS}"
 echo "  d_ff=${D_FF}, d_state=${D_STATE}"
 echo "  d_conv_temporal=${D_CONV_TEMPORAL}, expand_temporal=${EXPAND_TEMPORAL}"
 echo "  lr=${LR}, weight_decay=${WEIGHT_DECAY}, dropout=${DROPOUT}"
-echo "  mask_ratio=${MASK_RATIO}, block_size=${BLOCK_SIZE}"
+echo "  mask_strategy=${MASK_STRATEGY}, mask_ratio=${MASK_RATIO}, block_size=${BLOCK_SIZE}"
+echo "  n_mask_phonemes=${N_MASK_PHONEMES}"
 echo "  batch_size=${BATCH_SIZE}, seq_len=${SEQ_LEN}"
 echo "  mae_stride=${MAE_STRIDE}"
 echo "  alpha_mask=${ALPHA_MASK}, beta_next=${BETA_NEXT}, gamma_spectral=${GAMMA_SPECTRAL}"
@@ -66,7 +69,7 @@ python -u run.py \
   --is_training $IS_TRAINING \
   --root_path ./dataset/haskins/ \
   --data_path ema_7_pos_xz_phone.csv \
-  --model_id haskins_mae_pretrain_v1.0_${TRAIN_EPOCHS}epochs \
+  --model_id haskins_mae_pretrain_v1.1_${TRAIN_EPOCHS}epochs \
   --model $model_name \
   --data haskins_mae \
   --features M \
@@ -92,6 +95,8 @@ python -u run.py \
   --exp_name mae_pretrain \
   --mask_ratio $MASK_RATIO \
   --block_size $BLOCK_SIZE \
+  --mask_strategy $MASK_STRATEGY \
+  --n_mask_phonemes $N_MASK_PHONEMES \
   --warmup_epochs 3 \
   --weight_decay $WEIGHT_DECAY \
   --max_grad_norm 1.0 \

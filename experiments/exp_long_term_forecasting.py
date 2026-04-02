@@ -281,6 +281,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         preds = []
         trues = []
+        plot_count = 0
         path_after_dataset = self.args.root_path.split("dataset/")[-1].rstrip("/")
         model_name = self.args.model
         folder_path = (
@@ -397,6 +398,35 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                                 folder_path, str(i) + "_" + str(plot_idx) + ".pdf"
                             ),
                         )
+                        
+                if plot_count < 5 and i % max(1, min(len(test_loader), 20000) // 5) == 0:
+                    input_np = batch_x.detach().cpu().numpy()
+                    if test_data.scale and self.args.inverse:
+                        shape = input_np.shape
+                        input_np = test_data.inverse_transform(input_np.squeeze(0)).reshape(shape)
+                    
+                    phone_labels = None
+                    if hasattr(test_data, "get_phone_labels"):
+                        # 'i' here is the batch index, but since batch_size=1 it is also the datset index
+                        # However let's fetch for window index 'i'
+                        phone_labels = test_data.get_phone_labels(i)
+
+                    sentence_info = None
+                    if hasattr(test_data, "get_sentence_info"):
+                        sentence_info = test_data.get_sentence_info(i)
+
+                    # Plot first 16 variates
+                    self._plot_multivariate_forecast(
+                        context=input_np[0],
+                        target_future=true[0],
+                        pred_future=pred[0],
+                        pred_len=self.args.pred_len,
+                        variate_indices=list(range(min(16, N))),
+                        save_path=os.path.join(folder_path, f"multivariate_forecast_{i}.pdf"),
+                        phone_labels=phone_labels,
+                        sentence_info=sentence_info
+                    )
+                    plot_count += 1
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -526,3 +556,79 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         np.save(folder_path + "real_prediction.npy", preds)
 
         return
+
+    def _plot_multivariate_forecast(self, context, target_future, pred_future, pred_len, variate_indices, save_path, phone_labels=None, sentence_info=None):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        n_vars = len(variate_indices)
+        fig, axes = plt.subplots(n_vars, 1, figsize=(14, 2.5 * n_vars), sharex=True)
+        if n_vars == 1:
+            axes = [axes]
+        fig.subplots_adjust(top=0.92)
+        
+        phone_segments = []
+        if phone_labels is not None and len(phone_labels) > 0:
+            cur_phone = phone_labels[0]
+            seg_start = 0
+            for t in range(1, len(phone_labels)):
+                if phone_labels[t] != cur_phone:
+                    phone_segments.append((seg_start, t, cur_phone))
+                    cur_phone = phone_labels[t]
+                    seg_start = t
+            phone_segments.append((seg_start, len(phone_labels), cur_phone))
+
+        seq_len = len(context)
+        t_context = np.arange(seq_len)
+        t_future = np.arange(seq_len, seq_len + pred_len)
+
+        variate_names = [
+            "TR_posX", "TR_posZ", "TB_posX", "TB_posZ", 
+            "TT_posX", "TT_posZ", "UL_posX", "UL_posZ", 
+            "LL_posX", "LL_posZ", "ML_posX", "ML_posZ", 
+            "JAW_posX", "JAW_posZ", "JAWL_posX", "JAWL_posZ"
+        ]
+
+        for ax, idx in zip(axes, variate_indices):
+            ax.plot(t_context, context[:, idx], color="steelblue", linewidth=1.5, label="Context")
+            ax.plot(t_future, target_future[:, idx], color="forestgreen", linewidth=1.5, label="Target Future")
+            ax.plot(t_future, pred_future[:, idx], color="coral", linewidth=1.5, linestyle="--", label="Pred Future")
+            
+            ax.axvspan(seq_len, seq_len + pred_len, alpha=0.1, color="grey")
+
+            if phone_segments:
+                for seg_start, seg_end, phone in phone_segments:
+                    if seg_start > 0:
+                        ax.axvline(x=seg_start, color="purple", linewidth=1, linestyle="--", alpha=0.6)
+
+            var_name = variate_names[idx] if idx < len(variate_names) else f"Var {idx}"
+            ax.set_ylabel(var_name, fontsize=9)
+            if idx == variate_indices[0]:
+                ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+            ax.grid(True, alpha=0.3)
+
+        if phone_segments:
+            for ax in axes:
+                ymin, ymax = ax.get_ylim()
+                for seg_start, seg_end, phone in phone_segments:
+                    mid = (seg_start + seg_end) / 2
+                    ax.text(mid, ymax, str(phone), ha="center", va="bottom", fontsize=6, color="purple", clip_on=False)
+        
+        axes[-1].set_xlabel("Time (s)", fontsize=10)
+        total_frames = seq_len + pred_len
+        tick_locs = np.linspace(0, total_frames - 1, 8, dtype=int)
+        tick_labels = [f"{loc / 100.0:.2f}" for loc in tick_locs]
+        axes[-1].set_xticks(tick_locs)
+        axes[-1].set_xticklabels(tick_labels)
+        
+        title = "Multivariate Forecast"
+        if sentence_info is not None and sentence_info.get("sentence_id") is not None:
+            title += f"\nSentence {sentence_info.get('sentence_id')} [{sentence_info.get('speaker_id', '?')}]: \"{sentence_info.get('sentence', '?')}\""
+        
+        fig.suptitle(title, fontsize=12, y=0.98)
+        plt.tight_layout(rect=[0, 0, 0.9, 0.94])
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        plt.close()
+

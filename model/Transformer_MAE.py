@@ -28,6 +28,7 @@ import torch.nn.functional as F
 import math
 import numpy as np
 from utils.losses import spectral_loss as _spectral_loss
+from model.S_Mamba_MAE import generate_phoneme_mask  # noqa: F401 — shared implementation
 
 
 class PositionalEncoding(nn.Module):
@@ -51,6 +52,7 @@ class PositionalEncoding(nn.Module):
         """x: [B, L, D]"""
         x = x + self.pe[:, : x.size(1), :]
         return self.dropout(x)
+
 
 
 def generate_batch_block_mask(

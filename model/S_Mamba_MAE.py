@@ -134,6 +134,66 @@ class BiMambaEncoder(nn.Module):
         return self.norm(x)
 
 
+def generate_phoneme_mask(phone_ids, n_mask=4, device="cpu"):
+    """
+    Generate masks by selecting random phoneme segments to mask (per sample).
+
+    A "segment" is a contiguous run of the same phoneme ID. If phoneme A
+    appears at frames [10-15] and [80-90], those are two separate segments
+    that can be independently selected. This gives a predictable number of
+    masked segments (exactly n_mask, or fewer if the sentence is short).
+
+    Segments with phoneme ID 0 (silence/pause) are excluded from selection.
+
+    Uses numpy for efficient segment detection (vectorized diff) and mask
+    construction across the batch. Phone IDs stay on CPU since segment
+    detection is inherently sequential per sample but boundary detection
+    is vectorized.
+
+    Args:
+        phone_ids: [B, L] int/long tensor — per-frame phoneme IDs (0 = sp/pause)
+        n_mask: Number of phoneme segments to mask per sample (default 4)
+        device: torch device for the output mask
+
+    Returns:
+        mask: [B, L] boolean tensor, True = masked (to be predicted)
+    """
+    # Work on CPU numpy for segment detection — avoids GPU transfer overhead
+    ids_np = phone_ids.cpu().numpy() if phone_ids.is_cuda else phone_ids.numpy()
+    B, L = ids_np.shape
+    mask_np = np.zeros((B, L), dtype=np.bool_)
+
+    for b in range(B):
+        row = ids_np[b]
+
+        # Vectorized boundary detection: find where phone ID changes
+        changes = np.where(np.diff(row) != 0)[0] + 1  # frame indices of segment starts
+        boundaries = np.empty(len(changes) + 2, dtype=np.intp)
+        boundaries[0] = 0
+        boundaries[1:-1] = changes
+        boundaries[-1] = L
+
+        # Filter to non-silence segments
+        seg_phone_ids = row[boundaries[:-1]]  # phone ID at start of each segment
+        non_silence = seg_phone_ids != 0
+        seg_starts = boundaries[:-1][non_silence]
+        seg_ends = boundaries[1:][non_silence]
+        n_segs = len(seg_starts)
+
+        if n_segs == 0:
+            continue
+
+        # Randomly pick n_mask segments
+        n_pick = min(n_mask, n_segs)
+        chosen = np.random.choice(n_segs, size=n_pick, replace=False)
+
+        # Apply mask for chosen segments
+        for idx in chosen:
+            mask_np[b, seg_starts[idx]:seg_ends[idx]] = True
+
+    return torch.from_numpy(mask_np).to(device)
+
+
 def generate_batch_block_mask(
     batch_size, seq_len, mask_ratio=0.4, block_size=8, device="cpu"
 ):

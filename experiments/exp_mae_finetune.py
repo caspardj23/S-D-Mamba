@@ -101,7 +101,7 @@ class Exp_MAE_Finetune(Exp_Basic):
         self.model.eval()
 
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, *_extra) in enumerate(
                 vali_loader
             ):
                 if i >= 5000:
@@ -192,7 +192,7 @@ class Exp_MAE_Finetune(Exp_Basic):
             self.model.train()
             epoch_time = time.time()
 
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, *_extra) in enumerate(
                 train_loader
             ):
                 iter_count += 1
@@ -445,7 +445,7 @@ class Exp_MAE_Finetune(Exp_Basic):
 
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, *_extra) in enumerate(
                 test_loader
             ):
                 if i >= 20000:

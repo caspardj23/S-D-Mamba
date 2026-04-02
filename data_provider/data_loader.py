@@ -719,11 +719,25 @@ class Dataset_Haskins_MAE(Dataset):
         sentence_ids = df_raw["sentence_id"].values
         speaker_ids = df_raw["speaker_id"].values
 
-        # Store phone labels if available (for visualization)
+        # Store phone labels if available (for visualization and phoneme masking)
         if "phone" in df_raw.columns:
-            self.phone_labels = df_raw["phone"].values
+            # Fill NaN phone labels with "sp" (silence/pause)
+            self.phone_labels = df_raw["phone"].fillna("sp").values
+            # Build integer phone IDs for phoneme-level masking
+            # ID 0 = sp (short pause), real phonemes get IDs 1..N
+            unique_phones = sorted(set(self.phone_labels) - {"sp"})
+            self.phone_to_id = {"sp": 0}
+            for i, ph in enumerate(unique_phones, start=1):
+                self.phone_to_id[ph] = i
+            self.phone_ids = np.array(
+                [self.phone_to_id[p] for p in self.phone_labels], dtype=np.int32
+            )
+            self.n_phone_classes = len(self.phone_to_id)
         else:
             self.phone_labels = None
+            self.phone_ids = None
+            self.phone_to_id = None
+            self.n_phone_classes = 0
 
         # Store per-frame sentence_id for metadata lookup
         self.sentence_ids_per_frame = sentence_ids.copy()
@@ -817,6 +831,25 @@ class Dataset_Haskins_MAE(Dataset):
         self.window_starts = np.array(window_starts, dtype=np.int64)
         self.all_data = all_data
 
+        # Precompute phoneme segments per window for efficient masking
+        # Each entry is a list of (start_offset, end_offset) within the window
+        # Excludes silence segments (phone_id == 0)
+        if self.phone_ids is not None:
+            self.window_segments = []
+            for ws in self.window_starts:
+                ids = self.phone_ids[ws:ws + self.seq_len]
+                # Find boundaries using np.diff
+                changes = np.where(np.diff(ids) != 0)[0] + 1  # indices where a new segment starts
+                boundaries = np.concatenate(([0], changes, [self.seq_len]))
+                segs = []
+                for j in range(len(boundaries) - 1):
+                    s, e = int(boundaries[j]), int(boundaries[j + 1])
+                    if ids[s] != 0:  # exclude silence
+                        segs.append((s, e))
+                self.window_segments.append(segs)
+        else:
+            self.window_segments = None
+
         # Dummy timestamps (interface required, not used by MAE)
         self.data_stamp = np.zeros((len(all_data), 4), dtype=np.float32)
 
@@ -842,7 +875,13 @@ class Dataset_Haskins_MAE(Dataset):
         seq_x_mark = self.data_stamp[start:s_end]
         seq_y_mark = seq_x_mark
 
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
+        # Return per-frame phone IDs for phoneme-level masking
+        if self.phone_ids is not None:
+            phone_ids = self.phone_ids[start:s_end]
+        else:
+            phone_ids = np.zeros(self.seq_len, dtype=np.int32)
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark, phone_ids
 
     def __len__(self):
         return len(self.window_starts)
@@ -1163,6 +1202,26 @@ class Dataset_Haskins_Forecast(Dataset):
         sentence_ids = df_raw["sentence_id"].values
         speaker_ids = df_raw["speaker_id"].values
 
+        # Store phone labels if available (for visualization)
+        if "phone" in df_raw.columns:
+            self.phone_labels = df_raw["phone"].fillna("sp").values
+        else:
+            self.phone_labels = None
+
+        self.sentence_ids_per_frame = sentence_ids.copy()
+        
+        # Load sentence text lookup from ema_7_sentences.csv if it exists
+        self.sentence_text_map = {}
+        sentences_csv = os.path.join(self.root_path, "ema_7_sentences.csv")
+        if os.path.exists(sentences_csv):
+            df_sent = pd.read_csv(sentences_csv)
+            for _, row in df_sent.iterrows():
+                self.sentence_text_map[int(row["sentence_id"])] = {
+                    "sentence": row["sentence"],
+                    "speaker_id": row["speaker_id"],
+                    "sentence_group": row["sentence_group"],
+                }
+
         # Build sentence table: sentence_id → (start_row, end_row, speaker, group)
         sentences = {}
         if "sentence_group" in df_raw.columns:
@@ -1260,6 +1319,24 @@ class Dataset_Haskins_Forecast(Dataset):
 
     def __len__(self):
         return len(self.window_starts)
+
+    def get_phone_labels(self, index):
+        if self.phone_labels is None:
+            return None
+        start = self.window_starts[index]
+        s_end = start + self.seq_len + self.pred_len
+        return self.phone_labels[start:s_end]
+
+    def get_sentence_info(self, index):
+        start = self.window_starts[index]
+        sid = int(self.sentence_ids_per_frame[start])
+        if hasattr(self, "sentence_text_map") and sid in self.sentence_text_map:
+            return {
+                "sentence_id": sid,
+                "sentence": self.sentence_text_map[sid]["sentence"],
+                "speaker_id": self.sentence_text_map[sid]["speaker_id"],
+            }
+        return {"sentence_id": sid, "sentence": "Unknown", "speaker_id": "Unknown"}
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)

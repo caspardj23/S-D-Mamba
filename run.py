@@ -297,6 +297,19 @@ if __name__ == "__main__":
         help="size of contiguous masked blocks in MAE pre-training",
     )
     parser.add_argument(
+        "--mask_strategy",
+        type=str,
+        default="block",
+        choices=["block", "phoneme"],
+        help="masking strategy: 'block' (random contiguous blocks) or 'phoneme' (mask N phonemes)",
+    )
+    parser.add_argument(
+        "--n_mask_phonemes",
+        type=int,
+        default=4,
+        help="number of phonemes to mask per window when mask_strategy='phoneme'",
+    )
+    parser.add_argument(
         "--warmup_epochs",
         type=int,
         default=5,
